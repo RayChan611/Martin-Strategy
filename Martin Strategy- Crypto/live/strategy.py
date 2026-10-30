@@ -13,7 +13,9 @@
 - 未实现板块共振（加密板块轮动极快，且 OKX 无内置分类）
 """
 
+import time as _time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -101,6 +103,11 @@ class Signal:
     logic: list = field(default_factory=list)   # 简洁（飞书卡片用）
 
 
+# 日线状态缓存：{inst_id: (utc_date_str, DailyState)}
+# 日线指标用「已收盘」K 线计算，一天内稳定，故可缓存一整天。
+_DAILY_CACHE = {}
+
+
 class Config:
     """信号阈值（从 config.yaml 读，这里给默认值便于单测）"""
     def __init__(self, cfg: dict):
@@ -117,9 +124,21 @@ class Config:
 
 
 # ============ 日线状态 ============
-def build_daily_state(client, inst_id, ccfg: Config) -> Optional[DailyState]:
+def build_daily_state(client, inst_id, ccfg: Config, use_cache: bool = True) -> Optional[DailyState]:
+    """
+    日线状态。指标只用「已收盘」的日线（剔除最后一根未收盘），
+    因此一天内数值稳定，可按 UTC 日期缓存，避免每分钟重复拉取。
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if use_cache:
+        hit = _DAILY_CACHE.get(inst_id)
+        if hit and hit[0] == today:
+            return hit[1]
+
     raw = client.get_candles(inst_id, "1D", 200)
-    bars = to_bars(raw)
+    bars_all = to_bars(raw)
+    # 剔除最后一根（当天未收盘）
+    bars = bars_all[:-1] if len(bars_all) >= 2 else bars_all
     if len(bars) < 60:
         return None
 
@@ -170,7 +189,7 @@ def build_daily_state(client, inst_id, ccfg: Config) -> Optional[DailyState]:
     breakout_ok = days_since <= ccfg.e1_days_max
     reasons.append(f"E1距突破={days_since}天{'✓' if breakout_ok else '✗'}")
 
-    return DailyState(
+    _st = DailyState(
         inst_id=inst_id, ema9=e9[i], ema21=e21[i], ema50=e50[i],
         atr_daily_pct=atr_pct, adr_pct=adr, close=close,
         trend_ok=trend_ok, early_ok=early_ok,
@@ -178,6 +197,10 @@ def build_daily_state(client, inst_id, ccfg: Config) -> Optional[DailyState]:
         reasons=reasons,
         ema21_dev_pct=dev, weekly_streak=streak,
     )
+    if use_cache:
+        _DAILY_CACHE[inst_id] = (today, _st)
+        return _st
+    return _st
 
 
 # ============ 5m 触发 ============
@@ -199,6 +222,18 @@ def check_trigger(client, st: DailyState, ccfg: Config) -> Optional[Signal]:
     n = len(bars5)
     last = bars5[-1]
     prev = bars5[-2]
+
+    # ---- 实时位置校验（E3 必须用现价，不能用日线收盘）----
+    # 日线 E3 用的是「已收盘」价格，判的是昨天位置早不早；
+    # 但一天内可能已暴涨，此时位置早就晚了。这里用现价再卡一次。
+    cur_px = float(client.get_ticker(st.inst_id)["last"])
+    dev_now = (cur_px - st.ema21) / st.ema21 * 100 if st.ema21 else 0
+    dev_ema9_now = (cur_px - st.ema9) / st.ema9 * 100 if st.ema9 else 0
+    if dev_now >= ccfg.e3_ema21_dev_max:
+        return None
+    # 价格已远离 EMA9 时也不追（防止暴涨后追高）
+    if dev_ema9_now >= ccfg.e3_ema21_dev_max:
+        return None
 
     # 当日区间（用最近 288 根以内的同日数据近似：取最近 24 小时）
     day_window = bars5[-min(n, 288):]
@@ -222,7 +257,6 @@ def check_trigger(client, st: DailyState, ccfg: Config) -> Optional[Signal]:
         return None
 
     # 触发：最新价 > 前一根高点
-    cur_px = float(client.get_ticker(st.inst_id)["last"])
     if cur_px <= prev[1]:
         return None
 
@@ -270,6 +304,7 @@ def check_trigger(client, st: DailyState, ccfg: Config) -> Optional[Signal]:
         f"回调：低点 {low_val:.6g} 触及日线 EMA9 {st.ema9:.6g}",
         f"V 型：{bars_since_low} 根 5m 内收复 EMA9",
         f"触发：现价 {cur_px:.6g} > 前一根高点 {prev[1]:.6g}",
+        f"实时位置：偏离 EMA21 {dev_now:+.1f}%，偏离 EMA9 {dev_ema9_now:+.1f}%",
     ]
     reasons = st.reasons + [
         f"C回调到位✓(低点{low_val:.6g}<=EMA9 {st.ema9:.6g})",
@@ -337,3 +372,7 @@ def is_extended(client, inst_id, cfg):
     above = all(closes[-i] > ema[-i] for i in range(1, n + 1))
     return above, dev_atr
 
+
+def clear_daily_cache():
+    """手动清缓存（跨日自动失效，一般不需要调）"""
+    _DAILY_CACHE.clear()

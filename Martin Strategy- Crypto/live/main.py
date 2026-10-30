@@ -65,6 +65,9 @@ def session_allows_entry(now, cfg):
         return True, "主窗口"
     if s.get("allow_secondary") and in_window(now, s["secondary_utc"]):
         return True, "次窗口"
+    # 放宽模式：除回避窗口外全部允许（原逻辑这里是 return False, "非交易时段"）
+    if s.get("mode", "all_except_avoid") == "all_except_avoid":
+        return True, "非主窗口"
     return False, "非交易时段"
 
 

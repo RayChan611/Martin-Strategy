@@ -14,20 +14,44 @@ account:
 
 # ============ 标的（先小范围跑通，稳定后再扩）============
 universe:
+  # ⚠️ 必须只放 instCategory=1（纯加密）的合约。
+  # OKX 把股票(GOOGL/INTC/SOXL, instCategory=3)与商品(XAU黄金/CL原油, instCategory=4)
+  # 也做成了 USDT 永续，它们有交易时段限制、周末数据缺口，会让 5m 指标失真。
+  # 本池 = ADTV>=1亿 且 instCategory=1，共 19 个（2026-10-30 快照，按成交额降序）
+  inst_category: 1
   symbols:
-    - "BTC-USDT-SWAP"
-    - "ETH-USDT-SWAP"
-    - "SOL-USDT-SWAP"
-    - "DOGE-USDT-SWAP"
-    - "SUI-USDT-SWAP"
-  # 扩池前置条件：先在这 5 个上跑满 20 笔且工程零错误，再考虑加到 31 个 ADTV≥1亿 的标的
+    - "BTC-USDT-SWAP"      # 134.4 亿
+    - "ETH-USDT-SWAP"      # 126.2 亿
+    - "ZEC-USDT-SWAP"      # 19.5 亿
+    - "SOL-USDT-SWAP"      # 19.2 亿
+    - "HYPE-USDT-SWAP"     # 12.7 亿
+    - "PEPE-USDT-SWAP"     # 7.9 亿
+    - "XRP-USDT-SWAP"      # 5.7 亿
+    - "DOGE-USDT-SWAP"     # 4.2 亿
+    - "NEAR-USDT-SWAP"     # 3.6 亿
+    - "BNB-USDT-SWAP"      # 3.0 亿
+    - "UNI-USDT-SWAP"      # 2.6 亿
+    - "WLD-USDT-SWAP"      # 2.1 亿
+    - "ENA-USDT-SWAP"      # 1.9 亿
+    - "PARTI-USDT-SWAP"    # 1.9 亿
+    - "PUMP-USDT-SWAP"     # 1.8 亿
+    - "TRX-USDT-SWAP"      # 1.5 亿
+    - "SUI-USDT-SWAP"      # 1.5 亿
+    - "TRUMP-USDT-SWAP"    # 1.1 亿
+    - "LIT-USDT-SWAP"      # 1.0 亿
 
 # ============ 时段（加密特化 §1.1）============
 session:
-  primary_utc:   ["09:00", "11:00"]   # 主窗口
-  secondary_utc: ["03:00", "05:00"]   # 次窗口
-  avoid_utc:     ["14:00", "16:00"]   # 回避（最活跃但胜率最低）
-  allow_secondary: false              # 先只跑主窗口，降低复杂度
+  # 实测（30天×5标的，V型反转后2h上涨占比）：
+  #   09:00-10:00 52% ｜ 10:00-11:00 62% ｜ 13:00 48% ｜ 14:00 40% ｜ 15:00 27% ｜ 16:00 46%
+  # 原本只开主窗口 = 每天 2 小时，22 小时完全不看盘，实测成为最大瓶颈
+  # （19 个标的中已有 1 个通过日线，但因不在时段连 5m 都不检查）。
+  # 现改为「除回避窗口外全天可交易」：机会 ×11，代价是夜盘胜率略低。
+  mode: "all_except_avoid"        # all_except_avoid | window_only
+  primary_utc:   ["09:00", "11:00"]   # 质量最好的窗口（保留标注，用于日志区分）
+  secondary_utc: ["03:00", "05:00"]
+  avoid_utc:     ["14:00", "16:00"]   # 最活跃但胜率最低（27%-40%），仍回避
+  allow_secondary: true
 
 # ============ 仓位（按 100 USDT 重算）============
 position:
