@@ -133,8 +133,11 @@ class FeishuNotifier:
         return self.send_card(f"{prefix}🔵 开仓 · {inst.split('-')[0]}",
                               lines, template="blue")
 
-    def notify_trim(self, inst, detail, entry_px, cur_px, pnl_r, reason):
-        """减仓卡片（L1/L4 等部分平仓）"""
+    def notify_trim(self, inst, detail, entry_px, cur_px, pnl_r, reason,
+                    equity=None, hold_days=None, dry=False):
+        """减仓卡片：触发原因 + 动作 + 浮盈 + 账户总额 + 持仓时长"""
+        prefix = "【DRY】" if dry else ""
+        pnl_pct = (cur_px - entry_px) / entry_px * 100 if entry_px else 0
         lines = [
             f"**标的**　`{inst}`",
             f"**触发原因**　{reason}",
@@ -143,9 +146,14 @@ class FeishuNotifier:
             "---",
             f"**入场价**　{entry_px:.6g}",
             f"**当前价**　{cur_px:.6g}",
-            f"**浮盈**　{pnl_r:+.2f}R",
+            f"**浮盈**　{pnl_r:+.2f}R　（{pnl_pct:+.2f}%）",
         ]
-        return self.send_card(f"🟡 减仓 · {inst.split('-')[0]}", lines, template="yellow")
+        if hold_days is not None:
+            lines.append(f"**持仓时长**　{hold_days:.1f} 天")
+        if equity is not None:
+            lines += ["---", f"**账户总额**　{equity:.2f} USDT"]
+        return self.send_card(f"{prefix}🟡 减仓 · {inst.split('-')[0]}",
+                              lines, template="yellow")
 
     def notify_close(self, inst, entry_px, exit_px, pnl_usdt, pnl_r, reason,
                      equity=None, hold_days=None, dry=False):

@@ -218,9 +218,16 @@ def main():
                             pnl_r = (cur - tr["entry_px"]) / rr if rr > 0 else 0
                             log(f"    {inst} {detail}")
                             try:
+                                eq = client.get_usdt_equity()
+                            except Exception:
+                                eq = None
+                            hd = (time.time() - tr.get("opened_at", time.time())) / 86400
+                            adv = tr.get("last_advisor") or {}
+                            reason = adv.get("reason") or "浮盈达 R 门槛 + 1h 延伸过度"
+                            try:
                                 notifier.notify_trim(inst, detail, tr["entry_px"],
-                                                     cur, pnl_r,
-                                                     "浮盈达 R 门槛 + 1h 延伸过度")
+                                                     cur, pnl_r, reason,
+                                                     equity=eq, hold_days=hd)
                             except Exception:
                                 pass
                         elif action == "close":
