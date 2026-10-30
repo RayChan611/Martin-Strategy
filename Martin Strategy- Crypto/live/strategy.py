@@ -106,6 +106,24 @@ class Signal:
 # 日线状态缓存：{inst_id: (utc_date_str, DailyState)}
 # 日线指标用「已收盘」K 线计算，一天内稳定，故可缓存一整天。
 _DAILY_CACHE = {}
+# 日线原始 K 线缓存：{inst_id: (utc_date_str, bars)}
+# 多个买法共用同一份 bars，避免重复拉取
+_BARS_CACHE = {}
+
+
+def get_daily_bars(client, inst_id, use_cache=True):
+    """已收盘日线（剔除当天未收盘那根），按 UTC 日期缓存"""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if use_cache:
+        hit = _BARS_CACHE.get(inst_id)
+        if hit and hit[0] == today:
+            return hit[1]
+    raw = client.get_candles(inst_id, "1D", 200)
+    bars_all = to_bars(raw)
+    bars = bars_all[:-1] if len(bars_all) >= 2 else bars_all
+    if use_cache:
+        _BARS_CACHE[inst_id] = (today, bars)
+    return bars
 
 
 class Config:
@@ -137,10 +155,7 @@ def build_daily_state(client, inst_id, ccfg: Config, use_cache: bool = True) -> 
         if hit and hit[0] == today:
             return hit[1]
 
-    raw = client.get_candles(inst_id, "1D", 200)
-    bars_all = to_bars(raw)
-    # 剔除最后一根（当天未收盘）
-    bars = bars_all[:-1] if len(bars_all) >= 2 else bars_all
+    bars = get_daily_bars(client, inst_id, use_cache)
     if len(bars) < 60:
         return None
 
@@ -330,32 +345,179 @@ def check_trigger(client, st: DailyState, ccfg: Config) -> Optional[Signal]:
     )
 
 
+def _avg_tr_pct(bars):
+    """区间内平均真实波幅占收盘的百分比"""
+    if len(bars) < 2:
+        return 0.0
+    tot = 0.0
+    for i in range(1, len(bars)):
+        h, l, pc = bars[i][1], bars[i][2], bars[i - 1][3]
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        tot += tr / bars[i][3] * 100
+    return tot / (len(bars) - 1)
+
+
+# ============ 突破买法 ============
+def check_breakout_trigger(client, st: DailyState, ccfg: "Config", cfg: dict):
+    """
+    突破买法（v1.1 九步规则）：
+      ① 趋势（复用 st.trend_ok，由调用方保证）
+      ② 整理期 8-13 个交易日（|收盘/EMA9−1| ≤ 2%）
+      ③ 整理深度 ≤ 8%
+      ④ 波动收窄：后半 ATR% / 前半 ATR% < 0.85
+      ⑤ AVWAP 位置：未实现，跳过
+      ⑥ 整理前涨幅：记录不设门槛
+      ⑦ 突破日前一日不能是 inside day
+      ⑧ 触发：现价 > 昨日最高价（盘中即成交）
+      ⑨ 止损：当日最低点，宽度上限 5%
+    """
+    bcfg = cfg.get("signal", {}).get("breakout", {})
+    bars = get_daily_bars(client, st.inst_id)
+    n = len(bars)
+    if n < 30:
+        return None
+
+    closes = [b[3] for b in bars]
+    e9 = ema_series(closes, 9)
+    tol = bcfg.get("base_tol_pct", 2.0) / 100.0
+
+    # ---- ② 整理期：从倒数第 2 根（昨日）往前数连续贴近 EMA9 的天数 ----
+    K = 0
+    j = n - 2
+    while j >= 0 and e9[j] > 0 and abs(closes[j] / e9[j] - 1) <= tol:
+        K += 1
+        j -= 1
+    dmin = bcfg.get("base_days_min", 8)
+    dmax = bcfg.get("base_days_max", 13)
+    if K < dmin or K > dmax:
+        return None
+
+    # ---- ③ 整理深度 ----
+    seg = bars[n - K - 1:n - 1]
+    if len(seg) < 3:
+        return None
+    hi = max(b[1] for b in seg)
+    lo = min(b[2] for b in seg)
+    if lo <= 0:
+        return None
+    depth = (hi - lo) / lo * 100
+    if depth > bcfg.get("base_depth_max_pct", 8.0):
+        return None
+
+    # ---- ④ 波动收窄 ----
+    half = max(2, K // 2)
+    a1 = _avg_tr_pct(seg[:half])
+    a2 = _avg_tr_pct(seg[-half:])
+    if a1 <= 0:
+        return None
+    ratio = a2 / a1
+    if ratio >= bcfg.get("atr_compress_ratio_max", 0.85):
+        return None
+
+    # ---- ⑦ 昨日不能是 inside day ----
+    if bcfg.get("exclude_inside_day", True):
+        prev2, prev1 = bars[n - 2], bars[n - 1]
+        if prev1[1] <= prev2[1] and prev1[2] >= prev2[2]:
+            return None
+
+    # ---- ⑧ 触发：现价 > 昨日最高价 ----
+    cur_px = float(client.get_ticker(st.inst_id)["last"])
+    yday_high = bars[n - 1][1]
+    if cur_px <= yday_high:
+        return None
+
+    # ---- ⑨ 止损：当日最低点，宽度上限 ----
+    raw5 = client.get_candles(st.inst_id, "5m", 100)
+    b5 = to_bars(raw5)
+    if len(b5) < 20:
+        return None
+    day_low = min(b[2] for b in b5[-min(len(b5), 288):])
+    if day_low <= 0 or day_low >= cur_px:
+        return None
+    s_pct = (cur_px - day_low) / cur_px * 100
+    cap = bcfg.get("stop_cap_pct", 5.0)
+    s_min = max(ccfg.s_min_floor, 0.5)
+    if s_pct < s_min or s_pct > min(cap, ccfg.s_max_cap):
+        return None
+
+    # 整理前涨幅（记录）
+    pre_gain = 0.0
+    if n - K - 11 >= 0:
+        base0 = closes[n - K - 1]
+        if base0 > 0:
+            pre_gain = (base0 - closes[n - K - 11]) / closes[n - K - 11] * 100
+
+    logic = [
+        "突破买法：整理末期 + 盘中突破昨日高点",
+        f"整理期 {K} 天（要求 {dmin}-{dmax}），深度 {depth:.1f}%（≤{bcfg.get('base_depth_max_pct',8)}%）",
+        f"波动收窄：后半 ATR {a2:.2f}% / 前半 {a1:.2f}% = {ratio:.2f}（<{bcfg.get('atr_compress_ratio_max',0.85)}）",
+        f"整理前涨幅 {pre_gain:+.1f}%",
+        f"触发：现价 {cur_px:.6g} > 昨日高 {yday_high:.6g}",
+        f"止损：当日最低 {day_low:.6g}，宽度 {s_pct:.2f}%",
+    ]
+    reasons = [
+        f"A趋势=✓", f"②整理{K}天✓", f"③深度{depth:.1f}%✓",
+        f"④收窄{ratio:.2f}✓", f"⑧触发✓", f"⑨止损{s_pct:.2f}%",
+    ]
+    return Signal(
+        inst_id=st.inst_id, entry_px=cur_px, stop_px=day_low, s_pct=s_pct,
+        atr_daily_pct=st.atr_daily_pct,
+        atr_5m_pct=(cur_px - day_low) / cur_px * 100,
+        stop_source="breakout_day_low", reasons=reasons, logic=logic,
+    )
+
+
 # ============ 对外入口 ============
 def scan(client, symbols, cfg, log=print):
-    """扫描全部标的，返回 (候选状态列表, 触发的信号列表)"""
+    """
+    扫描全部标的，返回 (状态列表, 信号列表)。
+
+    每标的按买法优先级依次尝试，最多产出一个信号：
+      1) 回调买法（权重>0 且日线完整前置通过）
+      2) 突破买法（权重>0 且趋势通过即可 —— 它本身就是突破日，不需要 E1/E3）
+    """
     ccfg = Config(cfg)
+    w = cfg.get("signal", {}).get("weights", {})
+    w_pb = w.get("pullback", 0.8)
+    w_bo = w.get("breakout", 0.15)
     states, signals = [], []
+
     for inst in symbols:
         try:
             st = build_daily_state(client, inst, ccfg)
             if st is None:
-                log(f"  {inst:<18} 日线数据不足，跳过")
+                log(f"  {inst:<20} 日线数据不足，跳过")
                 continue
             states.append(st)
-            if not st.passed:
-                log(f"  {inst:<18} 日线未过 {' '.join(st.reasons)}")
-                continue
-            log(f"  {inst:<18} 日线通过，检查 5m 触发")
-            sg = check_trigger(client, st, ccfg)
-            if sg:
-                signals.append(sg)
-                log(f"  {inst:<18} ★ 触发 {sg.stop_source} s={sg.s_pct:.2f}%")
-        except Exception as e:
-            log(f"  {inst:<18} 异常 {type(e).__name__}: {str(e)[:80]}")
-    return states, signals
 
-# ============ 出场辅助：1h 图延伸过度判定 ============
-_OKX_BAR = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "1H": "1H", "4h": "4H", "1d": "1D"}
+            # ---- 1) 回调买法 ----
+            if w_pb > 0 and st.passed:
+                sg = check_trigger(client, st, ccfg)
+                if sg:
+                    log(f"  {inst:<20} ★ 回调买法触发 {sg.stop_source} s={sg.s_pct:.2f}%")
+                    signals.append(sg)
+                    continue
+                log(f"  {inst:<20} 日线通过，5m 未触发 → 试突破买法")
+
+            # ---- 2) 突破买法（只需趋势）----
+            if w_bo > 0 and st.trend_ok:
+                sg2 = check_breakout_trigger(client, st, ccfg, cfg)
+                if sg2:
+                    log(f"  {inst:<20} ★ 突破买法触发 s={sg2.s_pct:.2f}%")
+                    signals.append(sg2)
+                    continue
+
+            # ---- 都没触发：记录原因 ----
+            if not st.trend_ok:
+                log(f"  {inst:<20} 日线未过(A趋势✗) {' '.join(st.reasons)}")
+            elif st.passed:
+                log(f"  {inst:<20} 两种买法均未触发")
+            else:
+                log(f"  {inst:<20} 日线未过 {' '.join(st.reasons)}")
+        except Exception as e:
+            log(f"  {inst:<20} 异常 {type(e).__name__}: {str(e)[:80]}")
+
+    return states, signals
 
 
 def is_extended(client, inst_id, cfg):
@@ -387,3 +549,4 @@ def is_extended(client, inst_id, cfg):
 def clear_daily_cache():
     """手动清缓存（跨日自动失效，一般不需要调）"""
     _DAILY_CACHE.clear()
+    _BARS_CACHE.clear()

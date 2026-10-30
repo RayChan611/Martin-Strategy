@@ -73,6 +73,19 @@ signal:
     e3_weekly_up_max: 4             # 连涨周数 < N
     support_overlap_min: 2          # 支撑四要素重合 ≥ N（尚未实现）
     support_distance_max_pct: 1.0   # 或距最近支撑 ≤ X%（尚未实现）
+  # 三买法开关（权重 >0 才启用；实盘无法强制配比，权重仅作启用与优先级）
+  weights:
+    pullback: 0.80
+    breakout: 0.15
+    or_reversal: 0.00               # OR 反转在加密缺「开盘」载体，暂不启用
+  breakout:
+    base_days_min: 8                # 整理期下限（交易日）
+    base_days_max: 13               # 整理期上限
+    base_tol_pct: 2.0               # 整理期判定：|收盘/EMA9 - 1| <= 2%
+    base_depth_max_pct: 8.0         # 整理期 (最高-最低)/最低 <= 8%
+    atr_compress_ratio_max: 0.85    # 后半段 ATR / 前半段 ATR < 0.85
+    exclude_inside_day: true        # 突破日前一日不能是 inside day
+    stop_cap_pct: 5.0               # 止损宽度上限
 
 # ============ 止损（v2.0 区间判定）============
 stoploss:
