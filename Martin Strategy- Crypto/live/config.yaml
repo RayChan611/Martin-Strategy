@@ -64,6 +64,16 @@ position:
   single_position_max_pct: 33.0       # 单笔名义 ≤ 账户 33%
   min_notional_usdt: 15               # 低于此名义不开仓（避免手续费占比过高）
 
+# ============ 信号条件（此前缺失，参数硬编码在代码里，现补齐）============
+signal:
+  pullback:
+    e1_days_max: 30                 # 距最近突破日 ≤ N 天（严格通道）
+    e1_relaxed_dev_pct: 5.0         # 放宽通道：日线收盘距 EMA21 < X% 时，突破多久不重要
+    e3_ema21_dev_max: 15.0          # 位置：偏离 EMA21 < X%
+    e3_weekly_up_max: 4             # 连涨周数 < N
+    support_overlap_min: 2          # 支撑四要素重合 ≥ N（尚未实现）
+    support_distance_max_pct: 1.0   # 或距最近支撑 ≤ X%（尚未实现）
+
 # ============ 止损（v2.0 区间判定）============
 stoploss:
   s_max:

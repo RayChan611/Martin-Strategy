@@ -118,9 +118,11 @@ class Config:
         self.s_min_floor = s.get("s_min", {}).get("floor_pct", 0.5)
         self.s_min_atr5m_mult = s.get("s_min", {}).get("atr_5m_mult", 3.0)
         sig = cfg.get("signal", {}).get("pullback", {})
-        self.e1_days_max = 30
-        self.e3_ema21_dev_max = 15.0
-        self.support_near_pct = 1.0
+        self.e1_days_max = sig.get("e1_days_max", 30)
+        self.e1_relaxed_dev_pct = sig.get("e1_relaxed_dev_pct", 5.0)
+        self.e3_ema21_dev_max = sig.get("e3_ema21_dev_max", 15.0)
+        self.e3_weekly_up_max = sig.get("e3_weekly_up_max", 4)
+        self.support_near_pct = sig.get("support_distance_max_pct", 1.0)
 
 
 # ============ 日线状态 ============
@@ -173,7 +175,7 @@ def build_daily_state(client, inst_id, ccfg: Config, use_cache: bool = True) -> 
             streak += 1
         else:
             break
-    streak_ok = streak < 4
+    streak_ok = streak < ccfg.e3_weekly_up_max
     early_ok = dev_ok and streak_ok
     reasons.append(f"E3位置={'✓' if early_ok else '✗'}(偏离{dev:.1f}%/连涨{streak}周)")
 
@@ -186,8 +188,17 @@ def build_daily_state(client, inst_id, ccfg: Config, use_cache: bool = True) -> 
             bos_idx = j
             break
     days_since = (len(bars) - 1 - bos_idx) if bos_idx is not None else 9999
-    breakout_ok = days_since <= ccfg.e1_days_max
-    reasons.append(f"E1距突破={days_since}天{'✓' if breakout_ok else '✗'}")
+    # E1 双通道：距突破 ≤N 天  或  位置仍很靠近 EMA21（说明没追高，突破多久不重要）
+    e1_strict = days_since <= ccfg.e1_days_max
+    e1_relaxed = abs(dev) < ccfg.e1_relaxed_dev_pct
+    breakout_ok = e1_strict or e1_relaxed
+    if e1_strict:
+        e1_tag = f"{days_since}天✓"
+    elif e1_relaxed:
+        e1_tag = f"{days_since}天→放宽(偏离{dev:+.1f}%)✓"
+    else:
+        e1_tag = f"{days_since}天✗(偏离{dev:+.1f}%)"
+    reasons.append(f"E1距突破={e1_tag}")
 
     _st = DailyState(
         inst_id=inst_id, ema9=e9[i], ema21=e21[i], ema50=e50[i],
