@@ -129,10 +129,16 @@ def main():
     client = OKXClient.from_env(demo=demo)
     state = load_state()
 
+    def calc_equity():
+        """仓位计算用权益 = min(API 实际权益, 配置上限)"""
+        raw = client.get_usdt_equity()
+        cap = cfg["account"].get("equity_cap_usdt") or 0
+        return min(raw, cap) if cap > 0 else raw, raw
+
     # 启动前先确认真实权益
     try:
-        equity = client.get_usdt_equity()
-        log(f"账户权益: {equity:.4f} USDT")
+        equity, equity_raw = calc_equity()
+        log(f"账户权益: {equity_raw:.4f} USDT（仓位按 {equity:.2f} 计算，上限 {cfg['account'].get('equity_cap_usdt')}）")
         if equity < 10:
             log("⚠️ 权益低于 10 USDT，请确认账户是否正确")
     except OKXError as e:
@@ -155,10 +161,10 @@ def main():
             # ---- 日切重置 ----
             if state["day"] != today:
                 state["day"] = today
-                state["day_start_equity"] = client.get_usdt_equity()
+                state["day_start_equity"] = calc_equity()[0]
                 log(f"—— 新交易日 {today}，起始权益 {state['day_start_equity']:.4f} ——")
 
-            equity = client.get_usdt_equity()
+            equity, _ = calc_equity()
 
             # ---- 熔断 ----
             if state.get("pause_until", 0) > time.time():
