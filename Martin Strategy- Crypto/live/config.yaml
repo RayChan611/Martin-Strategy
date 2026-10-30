@@ -4,14 +4,13 @@
 # ⚠️ 本文件的账户相关参数是按「100 USDT」算的，换账户规模必须重算并注释原因
 
 account:
-  equity_usdt: 100          # 名义账户规模
-  equity_cap_usdt: 100      # ⚠️ 仓位计算用的权益上限：min(API实际权益, 本值)
-                            # 作用：模拟盘默认 3000U，若不加上限会按 3000 算仓位（15U风险/1000U名义），
-                            # 与真钱 100U 的规模完全不同。加上限后模拟盘也按 100U 跑，验证才有意义。
+  equity_usdt: 3000         # 仅作参考，实际用 API 查到的权益
+  equity_cap_usdt: 0        # 0 = 不限制，直接用 API 实际权益；按百分比算仓位
   exchange: "okx"
   demo: true                # true=模拟盘（x-simulated-trading:1）；跑通后改 false
   margin_mode: "cross"      # 全仓
-  pos_mode: "net"           # 单向持仓（简化：不做多空同时持有）
+  pos_mode: "long_short"    # 双向持仓（OKX 切账户模式后变成 long_short_mode）
+  pos_side: "long"          # 双向持仓模式下单必须带 posSide，不能传 net
 
 # ============ 标的（先小范围跑通，稳定后再扩）============
 universe:

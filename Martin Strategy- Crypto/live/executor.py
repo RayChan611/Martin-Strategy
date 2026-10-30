@@ -67,7 +67,8 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
     # 1) 市价开多
     ord_res = client.place_order(
         inst_id=sg.inst_id, side="buy", sz=fmt_step(lots, ins["lotSz"]),
-        td_mode=cfg["account"]["margin_mode"], pos_side="net", ord_type="market",
+        td_mode=cfg["account"]["margin_mode"],
+        pos_side=cfg["account"].get("pos_side", "long"), ord_type="market",
     )
     ord_id = ord_res.get("ordId") if ord_res else None
     if not ord_id:
@@ -91,12 +92,13 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
         algo_id = client.place_stop_loss(
             inst_id=sg.inst_id, sz=fmt_step(lots, ins["lotSz"]),
             sl_trigger_px=stop_px, td_mode=cfg["account"]["margin_mode"],
-            pos_side="net", side="sell",
+            pos_side=cfg["account"].get("pos_side", "long"), side="sell",
         )
     except Exception as e:
         log(f"    ❌ 止损单挂失败: {e} -> 立即平仓，不留裸仓")
         try:
-            client.close_position(sg.inst_id, pos_side="net",
+            client.close_position(sg.inst_id,
+                                  pos_side=cfg["account"].get("pos_side", "long"),
                                   mgn_mode=cfg["account"]["margin_mode"])
         except Exception as e2:
             log(f"    ❌❌ 平仓也失败，需人工介入: {e2}")
@@ -112,7 +114,8 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
             except Exception:
                 pass
         try:
-            client.close_position(sg.inst_id, pos_side="net",
+            client.close_position(sg.inst_id,
+                                  pos_side=cfg["account"].get("pos_side", "long"),
                                   mgn_mode=cfg["account"]["margin_mode"])
         except Exception:
             pass
@@ -213,7 +216,8 @@ def close_position(client, tr, cfg, reason, log=print, notifier=None, exit_px=No
     except Exception as e:
         log(f"    ⚠️ 撤止损单失败（继续平仓）: {e}")
     try:
-        client.close_position(tr["inst_id"], pos_side="net",
+        client.close_position(tr["inst_id"],
+                              pos_side=cfg["account"].get("pos_side", "long"),
                               mgn_mode=cfg["account"]["margin_mode"])
         if notifier:
             try:

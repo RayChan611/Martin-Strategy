@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from okx_client import OKXClient, OKXError, calc_lots, actual_notional, fmt_step
 
 INST = "BTC-USDT-SWAP"
-TARGET_NOTIONAL = 31.0
+TARGET_NOTIONAL = 300.0   # 3000U 账户 x 0.5% 风险 / 1.5% 止损 ≈ 1000U，这里先用 300 小额验证
 
 
 def step(n, msg):
@@ -62,7 +62,7 @@ def main():
         # --- 3 市价开仓 ---
         step(3, "市价买入")
         r = c.place_order(INST, "buy", fmt_step(lots, lot), td_mode="cross",
-                          pos_side="net", ord_type="market")
+                          pos_side="long", ord_type="market")
         state["ord"] = r.get("ordId")
         state["opened"] = True
         print(f"    ordId={state['ord']}  sCode={r.get('sCode')}")
@@ -80,7 +80,7 @@ def main():
         step(4, "挂条件止损单（-1.5%）")
         stop_px = float(fmt_step(fill_px * 0.985, tick))
         algo = c.place_stop_loss(INST, fmt_step(lots, lot), stop_px,
-                                 td_mode="cross", pos_side="net", side="sell")
+                                 td_mode="cross", pos_side="long", side="sell")
         state["algo"] = algo
         print(f"    algoId={algo}  触发价 {stop_px}")
 
@@ -120,7 +120,7 @@ def main():
                 print(f"    撤止损失败: {str(e)[:100]}")
         if state["opened"]:
             try:
-                c.close_position(INST, pos_side="net", mgn_mode="cross")
+                c.close_position(INST, pos_side="long", mgn_mode="cross")
                 print("    已下平仓单")
             except Exception as e:
                 print(f"    平仓失败: {str(e)[:100]}")
