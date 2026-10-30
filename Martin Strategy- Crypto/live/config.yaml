@@ -59,8 +59,15 @@ exit:
   breakeven: "ema9_daily_above_entry" # 止损上移到成本
   trail: "ema9_daily_minus_0.1atr5m"  # 日线 EMA9 下方一点，只升不降
   first_trim:
-    r_threshold: 5                    # 首批 R 门槛（3/5/12/15 四档里先取中间值）
-    trim_pct: 15
+    r_threshold: 5                    # 首批 R 门槛（机械规则用；LLM 判断也参考它）
+    trim_pct: 15                      # 机械规则减仓比例
+    r_threshold_grid: [3, 5, 12, 15]  # 卡片「参考目标」展示用的 R 档位
+    extension_check:                  # 「1h 图离均线很远」的判定（is_extended 用）
+      timeframe: "1h"
+      ema_period: 21
+      atr_period: 14
+      atr_mult: 1.0
+      consecutive_closes: 3
   time_stop:
     days_soft: 15
     days_hard: 30
@@ -95,3 +102,15 @@ runtime:
 notify:
   feishu: true                      # 关闭后不发任何卡片
   # webhook 放 .env 的 FEISHU_WEBHOOK，不进 git
+
+# ============ 止盈判断器（LLM 综合判断）============
+advisor:
+  enabled: true
+  trigger_min_r: 3.0                # 浮盈达多少 R 才触发判断（最低档）
+  min_interval_hours: 4             # 同一笔交易两次判断的最小间隔，防刷
+  max_trim_pct_per_call: 50         # 单次减仓比例上限（LLM 只能给 15/30/50）
+  min_confidence: 0.6               # 低于此置信度一律 hold，不动作
+  temperature: 0                   # 0 = 尽量确定性，减少同输入不同结论
+  max_tokens: 4000                  # 实测 1200 会全被 reasoning 吃掉、content 为空；4000 够用
+  timeout_seconds: 120              # 实测单次判断耗时 10-25s
+  # 凭证放 .env：ARK_API_KEY / ARK_BASE_URL / ARK_MODEL

@@ -15,8 +15,11 @@
 import time
 import traceback
 
+import os
+
 from okx_client import calc_lots, actual_notional, fmt_step
 import strategy
+import advisor
 
 
 def calc_position(cfg, equity, s_pct, px, ins):
@@ -156,7 +159,7 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
                 fee_open=fee_open,
                 fee_round=fee_open * 2,
                 r_value=trade["r_value"],
-                r_targets=cfg.get("exit", {}).get("l1_first_trim", {})
+                r_targets=cfg.get("exit", {}).get("first_trim", {})
                     .get("r_threshold_grid", [3, 5, 12, 15]),
             )
         except Exception as e:
@@ -166,7 +169,7 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
 
 def manage_position(client, tr, cfg, ins, st_daily, log=print):
     """
-    管理单笔持仓：保本 -> 跟踪 -> 时间止损。
+    管理单笔持仓：止盈判断 -> 保本 -> 跟踪 -> 时间止损。
     返回 (action, detail)：action in {hold, amend, close}
     """
     dry = cfg["runtime"]["dry_run"]
@@ -175,23 +178,11 @@ def manage_position(client, tr, cfg, ins, st_daily, log=print):
     r = tr["r_value"]
     pnl_r = (cur - entry) / r if r > 0 else 0
 
-    # 0) L1 首批减仓：浮盈达 R 门槛 且 1h 图延伸过度 -> 卖固定比例
-    if not tr.get("trimmed"):
-        l1 = cfg["exit"]["l1_first_trim"]
-        thr = l1.get("r_threshold", 5)
-        if pnl_r >= thr:
-            try:
-                ext, dev_atr = strategy.is_extended(client, tr["inst_id"], cfg)
-            except Exception as e:
-                log(f"    {tr['inst_id']} 延伸判定失败: {str(e)[:60]}，本轮不减仓")
-                ext, dev_atr = False, 0.0
-            if ext:
-                trim_pct = l1.get("trim_pct", 15)
-                res = trim_position(client, tr, cfg, ins, trim_pct,
-                                    f"L1 减仓：浮盈 {pnl_r:.2f}R >= {thr}R 且 1h 偏离 {dev_atr:.2f}×ATR",
-                                    log=log)
-                if res:
-                    return "trim", res
+    # 0) 止盈判断：浮盈达触发档 -> LLM 综合判断（失败则回退机械规则）
+    acfg = cfg.get("advisor", {})
+    trim_res = _try_advisor_exit(client, tr, cfg, ins, pnl_r, cur, st_daily, log)
+    if trim_res:
+        return trim_res
 
     # 1) 保本：日线 EMA9 升到成本之上
     new_stop = stop
@@ -229,6 +220,69 @@ def manage_position(client, tr, cfg, ins, st_daily, log=print):
         return "close", f"持有 {days:.1f} 天且浮盈 {pnl_r:.2f}R < 1R"
 
     return "hold", f"浮盈 {pnl_r:+.2f}R"
+
+
+def _try_advisor_exit(client, tr, cfg, ins, pnl_r, cur, st_daily, log):
+    """
+    止盈判断入口。返回 ("trim", 描述) / ("close", 原因) / None（不动作）。
+
+    逻辑：
+    1. 浮盈未达 trigger_min_r -> 直接返回 None（不浪费 LLM 调用）
+    2. 距上次判断不足 min_interval_hours -> 跳过（防刷、控成本）
+    3. 调 LLM；任何失败 -> 回退到机械规则（浮盈>=r_threshold 且 1h 延伸 -> 减 trim_pct%）
+    """
+    import time as _t
+    acfg = cfg.get("advisor", {})
+    l1 = cfg["exit"]["first_trim"]
+
+    trigger_r = acfg.get("trigger_min_r", 3.0)
+    if pnl_r < trigger_r:
+        return None
+
+    # 冷却：同一笔交易两次判断的间隔
+    cool = acfg.get("min_interval_hours", 4) * 3600
+    last = tr.get("last_advisor_ts", 0)
+    if _t.time() - last < cool:
+        return None
+
+    key = os.getenv("ARK_API_KEY", "")
+    base = os.getenv("ARK_BASE_URL", "")
+    model = os.getenv("ARK_MODEL", "")
+
+    d = None
+    if acfg.get("enabled", True) and key and base and model:
+        d = advisor.decide(client, tr, cfg, key, base, model, st_daily=st_daily, log=log)
+        tr["last_advisor_ts"] = _t.time()
+        tr["last_advisor"] = {"action": d.get("action"), "pct": d.get("pct"),
+                              "reason": d.get("reason"),
+                              "conf": d.get("confidence"),
+                              "ts": int(tr["last_advisor_ts"])}
+        log(f"    [advisor] {d['action']} pct={d['pct']} "
+            f"conf={d.get('confidence')} — {d['reason']}")
+
+        if d["action"] == "trim" and d["pct"] > 0:
+            res = trim_position(client, tr, cfg, ins, d["pct"],
+                                f"LLM 判断：{d['reason']}", log=log)
+            if res:
+                return ("trim", res)
+        return None  # hold 或 trim 失败 -> 交给后面的保本/跟踪
+
+    # ---- LLM 不可用：机械兜底 ----
+    log("    [advisor] 未配置或未启用，走机械规则")
+    if tr.get("trimmed"):
+        return None
+    if pnl_r < l1.get("r_threshold", 5):
+        return None
+    try:
+        ext, dev_atr = strategy.is_extended(client, tr["inst_id"], cfg)
+    except Exception:
+        return None
+    if not ext:
+        return None
+    res = trim_position(client, tr, cfg, ins, l1.get("trim_pct", 15),
+                        f"机械规则：浮盈 {pnl_r:.2f}R 且 1h 偏离 {dev_atr:.2f}×ATR",
+                        log=log)
+    return ("trim", res) if res else None
 
 
 def trim_position(client, tr, cfg, ins, trim_pct, reason, log=print):

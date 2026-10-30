@@ -317,7 +317,7 @@ def is_extended(client, inst_id, cfg):
     判定「1 小时图上已经离均线很远」—— L1 首批减仓的必要条件之一。
     条件：价格 > EMA21 + mult×ATR14，且连续 N 根 1H 收盘在 EMA21 上方。
     """
-    e = cfg["exit"]["l1_first_trim"]["extension_check"]
+    e = cfg["exit"]["first_trim"]["extension_check"]
     bar = _OKX_BAR.get(e.get("timeframe", "1h"), "1H")
     need = max(e["ema_period"], e["atr_period"]) + e["consecutive_closes"] + 5
     raw = client.get_candles(inst_id, bar, min(max(need, 60), 300))
