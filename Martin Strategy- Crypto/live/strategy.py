@@ -307,3 +307,33 @@ def scan(client, symbols, cfg, log=print):
         except Exception as e:
             log(f"  {inst:<18} 异常 {type(e).__name__}: {str(e)[:80]}")
     return states, signals
+
+# ============ 出场辅助：1h 图延伸过度判定 ============
+_OKX_BAR = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "1H": "1H", "4h": "4H", "1d": "1D"}
+
+
+def is_extended(client, inst_id, cfg):
+    """
+    判定「1 小时图上已经离均线很远」—— L1 首批减仓的必要条件之一。
+    条件：价格 > EMA21 + mult×ATR14，且连续 N 根 1H 收盘在 EMA21 上方。
+    """
+    e = cfg["exit"]["l1_first_trim"]["extension_check"]
+    bar = _OKX_BAR.get(e.get("timeframe", "1h"), "1H")
+    need = max(e["ema_period"], e["atr_period"]) + e["consecutive_closes"] + 5
+    raw = client.get_candles(inst_id, bar, min(max(need, 60), 300))
+    bars = to_bars(raw)
+    if len(bars) < max(e["ema_period"], e["atr_period"]) + 2:
+        return False, 0.0
+    closes = [b[3] for b in bars]
+    ema = ema_series(closes, e["ema_period"])
+    atr = atr_series(bars, e["atr_period"])
+    cur = closes[-1]
+    if atr[-1] <= 0:
+        return False, 0.0
+    dev_atr = (cur - ema[-1]) / atr[-1]
+    if dev_atr <= e["atr_mult"]:
+        return False, dev_atr
+    n = e["consecutive_closes"]
+    above = all(closes[-i] > ema[-i] for i in range(1, n + 1))
+    return above, dev_atr
+

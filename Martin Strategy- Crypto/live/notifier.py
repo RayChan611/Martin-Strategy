@@ -133,6 +133,20 @@ class FeishuNotifier:
         return self.send_card(f"{prefix}🔵 开仓 · {inst.split('-')[0]}",
                               lines, template="blue")
 
+    def notify_trim(self, inst, detail, entry_px, cur_px, pnl_r, reason):
+        """减仓卡片（L1/L4 等部分平仓）"""
+        lines = [
+            f"**标的**　`{inst}`",
+            f"**触发原因**　{reason}",
+            "---",
+            f"**动作**　{detail}",
+            "---",
+            f"**入场价**　{entry_px:.6g}",
+            f"**当前价**　{cur_px:.6g}",
+            f"**浮盈**　{pnl_r:+.2f}R",
+        ]
+        return self.send_card(f"🟡 减仓 · {inst.split('-')[0]}", lines, template="yellow")
+
     def notify_close(self, inst, entry_px, exit_px, pnl_usdt, pnl_r, reason, dry=False):
         prefix = "【DRY】" if dry else ""
         win = pnl_usdt >= 0

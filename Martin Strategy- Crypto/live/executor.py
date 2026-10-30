@@ -16,6 +16,7 @@ import time
 import traceback
 
 from okx_client import calc_lots, actual_notional, fmt_step
+import strategy
 
 
 def calc_position(cfg, equity, s_pct, px, ins):
@@ -174,6 +175,24 @@ def manage_position(client, tr, cfg, ins, st_daily, log=print):
     r = tr["r_value"]
     pnl_r = (cur - entry) / r if r > 0 else 0
 
+    # 0) L1 首批减仓：浮盈达 R 门槛 且 1h 图延伸过度 -> 卖固定比例
+    if not tr.get("trimmed"):
+        l1 = cfg["exit"]["l1_first_trim"]
+        thr = l1.get("r_threshold", 5)
+        if pnl_r >= thr:
+            try:
+                ext, dev_atr = strategy.is_extended(client, tr["inst_id"], cfg)
+            except Exception as e:
+                log(f"    {tr['inst_id']} 延伸判定失败: {str(e)[:60]}，本轮不减仓")
+                ext, dev_atr = False, 0.0
+            if ext:
+                trim_pct = l1.get("trim_pct", 15)
+                res = trim_position(client, tr, cfg, ins, trim_pct,
+                                    f"L1 减仓：浮盈 {pnl_r:.2f}R >= {thr}R 且 1h 偏离 {dev_atr:.2f}×ATR",
+                                    log=log)
+                if res:
+                    return "trim", res
+
     # 1) 保本：日线 EMA9 升到成本之上
     new_stop = stop
     if st_daily and st_daily.ema9 > entry and entry > stop:
@@ -210,6 +229,67 @@ def manage_position(client, tr, cfg, ins, st_daily, log=print):
         return "close", f"持有 {days:.1f} 天且浮盈 {pnl_r:.2f}R < 1R"
 
     return "hold", f"浮盈 {pnl_r:+.2f}R"
+
+
+def trim_position(client, tr, cfg, ins, trim_pct, reason, log=print):
+    """
+    部分平仓（减仓）并同步改小止损单数量。
+    返回描述字符串；失败返回 None（保持持仓不变）。
+    """
+    dry = cfg["runtime"]["dry_run"]
+    cur_lots = float(tr["lots"])
+    ct_val = float(ins["ctVal"])
+    lot_str = ins["lotSz"]
+    min_sz = float(ins["minSz"])
+
+    raw_trim = cur_lots * trim_pct / 100.0
+    # 向下取整：宁少卖不多卖。四舍五入会把 0.006 张放大成 0.01 张（实际 25%），
+    # 小仓位上等于把「15% 减仓」变成「25% 减仓」，破坏比例设计。
+    trim_lots = int(raw_trim / float(lot_str) + 1e-9) * float(lot_str)
+    trim_lots = round(trim_lots, 12)
+    remain = round(cur_lots - trim_lots, 12)
+
+    # 边界：减仓量不足最小下单量，或剩余不足最小下单量 -> 不做
+    if trim_lots < min_sz:
+        log(f"    {tr['inst_id']} 减仓量 {trim_lots} 张 < 最小下单量 {min_sz}（目标 {trim_pct}%），跳过减仓")
+        return None
+    if remain < min_sz:
+        log(f"    {tr['inst_id']} 剩余 {remain} 小于最小下单量，改为全部平仓")
+        return None
+
+    log(f"    {tr['inst_id']} {reason}")
+    log(f"    {tr['inst_id']} 减仓 {fmt_step(trim_lots, lot_str)} 张，剩余 "
+        f"{fmt_step(remain, lot_str)} 张（原 {fmt_step(cur_lots, lot_str)}）")
+
+    if dry:
+        tr["trimmed"] = True
+        tr["lots"] = fmt_step(remain, lot_str)
+        return f"[dry] 减仓 {trim_pct}%，剩余 {fmt_step(remain, lot_str)} 张"
+
+    # 1) 卖出减仓部分（双向持仓模式：side=sell + posSide=long 即为平多）
+    try:
+        client.place_order(tr["inst_id"], "sell", fmt_step(trim_lots, lot_str),
+                           td_mode=cfg["account"]["margin_mode"],
+                           pos_side=cfg["account"].get("pos_side", "long"),
+                           ord_type="market")
+    except Exception as e:
+        log(f"    ❌ 减仓下单失败，保持原仓位: {str(e)[:120]}")
+        return None
+
+    # 2) 同步把止损单数量改小（关键：否则止损数量会超过实际持仓）
+    try:
+        if tr.get("algo_id"):
+            client.amend_stop_loss(tr["inst_id"], tr["algo_id"], tr["stop_px"],
+                                   sz=fmt_step(remain, lot_str))
+            log(f"    ✅ 止损单数量已同步改为 {fmt_step(remain, lot_str)} 张")
+    except Exception as e:
+        log(f"    ⚠️ 止损单数量同步失败（需人工核对）: {str(e)[:120]}")
+
+    tr["trimmed"] = True
+    tr["lots"] = fmt_step(remain, lot_str)
+    trim_notional = trim_lots * ct_val * tr["entry_px"]
+    return (f"减仓 {trim_pct}%　{fmt_step(trim_lots, lot_str)} 张（≈{trim_notional:.2f} USDT）"
+            f"　剩余 {fmt_step(remain, lot_str)} 张")
 
 
 def close_position(client, tr, cfg, reason, log=print, notifier=None, exit_px=None):

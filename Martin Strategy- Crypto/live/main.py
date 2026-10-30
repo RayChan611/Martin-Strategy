@@ -209,7 +209,21 @@ def main():
                             client, inst, strategy.Config(cfg))
                         action, detail = executor.manage_position(
                             client, tr, cfg, ins, st_daily, log=log)
-                        if action == "close":
+                        if action == "trim":
+                            try:
+                                cur = float(client.get_ticker(inst)["last"])
+                            except Exception:
+                                cur = tr["entry_px"]
+                            rr = tr["r_value"]
+                            pnl_r = (cur - tr["entry_px"]) / rr if rr > 0 else 0
+                            log(f"    {inst} {detail}")
+                            try:
+                                notifier.notify_trim(inst, detail, tr["entry_px"],
+                                                     cur, pnl_r,
+                                                     "浮盈达 R 门槛 + 1h 延伸过度")
+                            except Exception:
+                                pass
+                        elif action == "close":
                             try:
                                 exit_px = float(client.get_ticker(inst)["last"])
                             except Exception:
