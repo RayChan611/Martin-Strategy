@@ -143,10 +143,12 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
         try:
             notifier.notify_open(
                 inst=sg.inst_id, entry_px=fill_px, stop_px=stop_px,
-                lots=fmt_step(lots, ins["lotSz"]), notional=trade["notional"],
+                notional=trade["notional"],
                 risk_usdt=risk, s_pct=sg.s_pct,
                 risk_pct=risk / equity * 100 if equity else 0,
                 stop_source=sg.stop_source,
+                equity=equity,
+                leverage=cfg["position"].get("leverage_set", 1),
             )
         except Exception as e:
             log(f"    [通知] 开仓推送失败（不影响交易）: {str(e)[:80]}")

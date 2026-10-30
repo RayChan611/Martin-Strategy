@@ -84,20 +84,25 @@ class FeishuNotifier:
         })
 
     # ---------- 业务事件 ----------
-    def notify_open(self, inst, entry_px, stop_px, lots, notional, risk_usdt,
-                    s_pct, risk_pct, stop_source, dry=False):
+    def notify_open(self, inst, entry_px, stop_px, notional, risk_usdt, s_pct,
+                    risk_pct, stop_source, equity, leverage, dry=False):
+        """开仓卡片：不含张数，含账户余额与杠杆"""
         prefix = "【DRY】" if dry else ""
         r_val = entry_px - stop_px
         lines = [
             f"**标的**　`{inst}`",
-            f"**方向**　做多（市价）",
+            "**方向**　做多（市价）",
             "---",
-            f"**入场**　{entry_px:.6g}",
-            f"**止损**　{stop_px:.6g}（{stop_source}）",
-            f"**止损宽度**　{s_pct:.2f}%　= 1R {r_val:.6g}",
+            f"**入场价**　{entry_px:.6g}",
+            f"**止损价**　{stop_px:.6g}　（{stop_source}）",
+            f"**止损宽度**　{s_pct:.2f}%",
+            f"**1R 幅度**　{r_val:.6g}",
             "---",
-            f"**张数**　{lots}　｜　**名义**　{notional:.2f} USDT",
-            f"**风险**　{risk_usdt:.3f} USDT（账户 {risk_pct:.2f}%）",
+            f"**名义金额**　{notional:.2f} USDT",
+            f"**风险额**　{risk_usdt:.3f} USDT　（占比 {risk_pct:.2f}%）",
+            "---",
+            f"**账户余额**　{equity:.2f} USDT",
+            f"**杠杆**　{leverage}x",
         ]
         return self.send_card(f"{prefix}🔵 开仓 · {inst.split('-')[0]}",
                               lines, template="blue")
@@ -132,7 +137,8 @@ if __name__ == "__main__":
     n = FeishuNotifier.from_env()
     print("webhook 已配置:", bool(n.webhook), "| enabled:", n.enabled)
     ok1 = n.notify_open(
-        "BTC-USDT-SWAP", 78000, 76830, "0.04", 31.2, 0.47, 1.5, 0.47, "day_low")
+        "BTC-USDT-SWAP", 78000, 76830, 1000.0, 15.0, 1.5, 0.50, "day_low",
+        equity=2999.58, leverage=3)
     print("开仓卡片:", "✅" if ok1 else "❌")
     ok2 = n.notify_close(
         "BTC-USDT-SWAP", 78000, 79200, 0.61, 1.54, "9EMA 跟踪")
