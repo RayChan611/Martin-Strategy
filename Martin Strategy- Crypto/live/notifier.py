@@ -85,13 +85,20 @@ class FeishuNotifier:
 
     # ---------- 业务事件 ----------
     def notify_open(self, inst, entry_px, stop_px, notional, risk_usdt, s_pct,
-                    risk_pct, stop_source, equity, leverage, dry=False):
-        """开仓卡片：不含张数，含账户余额与杠杆"""
+                    risk_pct, stop_source, equity, leverage,
+                    logic=None, fee_open=0.0, fee_round=0.0, dry=False):
+        """开仓卡片：含进场依据、手续费、余额、杠杆；不含张数"""
         prefix = "【DRY】" if dry else ""
         r_val = entry_px - stop_px
         lines = [
             f"**标的**　`{inst}`",
             "**方向**　做多（市价）",
+            "---",
+            "**【进场依据】**",
+        ]
+        for item in (logic or []):
+            lines.append(f"· {item}")
+        lines += [
             "---",
             f"**入场价**　{entry_px:.6g}",
             f"**止损价**　{stop_px:.6g}　（{stop_source}）",
@@ -100,6 +107,13 @@ class FeishuNotifier:
             "---",
             f"**名义金额**　{notional:.2f} USDT",
             f"**风险额**　{risk_usdt:.3f} USDT　（占比 {risk_pct:.2f}%）",
+        ]
+        if fee_open > 0:
+            fee_pct_of_risk = (fee_round / risk_usdt * 100) if risk_usdt > 0 else 0
+            lines.append(
+                f"**手续费**　开仓 {fee_open:.4f} ｜ 往返 {fee_round:.4f} USDT"
+                f"　（往返占风险 {fee_pct_of_risk:.1f}%）")
+        lines += [
             "---",
             f"**账户余额**　{equity:.2f} USDT",
             f"**杠杆**　{leverage}x",
@@ -138,7 +152,14 @@ if __name__ == "__main__":
     print("webhook 已配置:", bool(n.webhook), "| enabled:", n.enabled)
     ok1 = n.notify_open(
         "BTC-USDT-SWAP", 78000, 76830, 1000.0, 15.0, 1.5, 0.50, "day_low",
-        equity=2999.58, leverage=3)
+        equity=2999.58, leverage=3,
+        logic=["日线趋势：EMA9 > EMA21 > EMA50，三线向上",
+               "位置：偏离 EMA21 -4.2%，连涨 0 周",
+               "距突破日：5 天",
+               "回调：低点 77900 触及日线 EMA9 77950",
+               "V 型：2 根 5m 内收复 EMA9",
+               "触发：现价 78000 > 前一根高点 77940"],
+        fee_open=0.50, fee_round=1.00)
     print("开仓卡片:", "✅" if ok1 else "❌")
     ok2 = n.notify_close(
         "BTC-USDT-SWAP", 78000, 79200, 0.61, 1.54, "9EMA 跟踪")

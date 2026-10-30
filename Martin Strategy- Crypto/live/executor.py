@@ -141,6 +141,8 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
 
     if notifier:
         try:
+            taker = cfg.get("cost", {}).get("taker_pct", 0.05) / 100.0
+            fee_open = trade["notional"] * taker
             notifier.notify_open(
                 inst=sg.inst_id, entry_px=fill_px, stop_px=stop_px,
                 notional=trade["notional"],
@@ -149,6 +151,9 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
                 stop_source=sg.stop_source,
                 equity=equity,
                 leverage=cfg["position"].get("leverage_set", 1),
+                logic=getattr(sg, "logic", None),
+                fee_open=fee_open,
+                fee_round=fee_open * 2,
             )
         except Exception as e:
             log(f"    [通知] 开仓推送失败（不影响交易）: {str(e)[:80]}")

@@ -13,7 +13,7 @@
 - 未实现板块共振（加密板块轮动极快，且 OKX 无内置分类）
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -80,6 +80,8 @@ class DailyState:
     days_since_breakout: int
     breakout_ok: bool
     reasons: list
+    ema21_dev_pct: float = 0.0      # 偏离 EMA21 的百分比
+    weekly_streak: int = 0          # 连涨周数
 
     @property
     def passed(self):
@@ -94,8 +96,9 @@ class Signal:
     s_pct: float             # 止损宽度 %
     atr_daily_pct: float
     atr_5m_pct: float
-    stop_source: str         # day_low / trigger_bar_low / prev_bar_low
-    reasons: list
+    stop_source: str         # day_low / swing_low / trigger_bar_low / prev_bar_low
+    reasons: list            # 详细（日志用）
+    logic: list = field(default_factory=list)   # 简洁（飞书卡片用）
 
 
 class Config:
@@ -173,6 +176,7 @@ def build_daily_state(client, inst_id, ccfg: Config) -> Optional[DailyState]:
         trend_ok=trend_ok, early_ok=early_ok,
         days_since_breakout=days_since, breakout_ok=breakout_ok,
         reasons=reasons,
+        ema21_dev_pct=dev, weekly_streak=streak,
     )
 
 
@@ -259,6 +263,14 @@ def check_trigger(client, st: DailyState, ccfg: Config) -> Optional[Signal]:
         return None
 
     name, stop_px, s_pct = chosen
+    logic = [
+        "日线趋势：EMA9 > EMA21 > EMA50，三线向上",
+        f"位置：偏离 EMA21 {st.ema21_dev_pct:+.1f}%，连涨 {st.weekly_streak} 周",
+        f"距突破日：{st.days_since_breakout} 天",
+        f"回调：低点 {low_val:.6g} 触及日线 EMA9 {st.ema9:.6g}",
+        f"V 型：{bars_since_low} 根 5m 内收复 EMA9",
+        f"触发：现价 {cur_px:.6g} > 前一根高点 {prev[1]:.6g}",
+    ]
     reasons = st.reasons + [
         f"C回调到位✓(低点{low_val:.6g}<=EMA9 {st.ema9:.6g})",
         f"V2速度✓({bars_since_low}根内收复)",
@@ -268,7 +280,7 @@ def check_trigger(client, st: DailyState, ccfg: Config) -> Optional[Signal]:
     return Signal(
         inst_id=st.inst_id, entry_px=cur_px, stop_px=stop_px, s_pct=s_pct,
         atr_daily_pct=st.atr_daily_pct, atr_5m_pct=atr5_pct,
-        stop_source=name, reasons=reasons,
+        stop_source=name, reasons=reasons, logic=logic,
     )
 
 
