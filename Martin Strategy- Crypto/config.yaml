@@ -1,0 +1,216 @@
+# Martin Strategy · Crypto —— 参数单一来源
+# 依据：../02-策略规格v0.2-参数定值.md (v2.0) + 01-加密特化方案.md
+# 改任何值前请先看 02 §6.6 的参数冻结要求，并同步 CHANGELOG
+# 单位说明：所有 pct 字段均为「百分数」（0.5 表示 0.5%），不是小数比例
+
+meta:
+  version: "1.0.0-crypto"
+  base_spec: "v2.0"
+  market: "binance_usdt_perpetual"
+  direction: "long_only"          # v2.0 §5.4.4 明确仅做多
+
+# ============ 标的池 ============
+universe:
+  rebuild_at_utc: "08:00"        # 每日重建；避开美股开盘与日切
+  max_size: 50
+  filters:
+    adtv_min_usd: 100000000     # 24h 成交额下限（约全市场前 10%）
+    adr_pct_min: 4.0              # ADR%(20日) 下限
+    weekly_vol_min: 4.0           # 周 ATR(5)/收盘，加密上调（美股原值 3.5）
+    weekly_vol_max: 20.0
+    amp_24h_max: 25.0             # 排除插针妖币
+    listed_days_min: 180          # 上市时长，排除新币
+    adtv_decay_ratio: 0.5         # ADTV(当前) >= ADTV(30日前) * 0.5
+    close_above_ema150: true      # 长期趋势过滤
+    status_must_be: "TRADING"     # 非 TRADING 直接剔除（加密特化 §3.2）
+
+# ============ 指标 ============
+indicators:
+  ema_daily: [9, 21, 50, 150]
+  ema_5m: [9, 21]
+  atr_daily_period: 14
+  atr_5m_period: 14
+  adr_lookback_days: 20
+  avwap:
+    anchor_rule: "last_close_breakout_of_20d_high"   # 锚定点必须规则化
+    candidates_offset_days: 2      # 锚点前后 ±2 天备选
+  weekly_vol:
+    atr_period: 5
+    lookback_days: 5
+
+# ============ 交易时段（加密特化 §1.1）============
+session:
+  note: "加密无开盘；用信号质量而非活跃度定窗口"
+  primary_window_utc: ["09:00", "11:00"]    # 上涨占比 52%-62%
+  secondary_window_utc: ["03:00", "05:00"]  # 上涨占比 56%
+  avoid_window_utc: ["14:00", "16:00"]      # 最活跃但胜率仅 27%-40%
+  allow_secondary: true
+  entry_lead_bars_5m: 12          # 窗口内允许入场的最早位置（1 小时后的第 12 根）
+  observe_only_first_bars_5m: 3   # 前 3 根只观察不下单
+
+# ============ 信号：三买法权重 ============
+signal:
+  weights:
+    pullback: 0.80     # 回调买法（主力）
+    breakout: 0.15     # 突破买法
+    or_reversal: 0.05  # OR 反转（未验证，仅试水）
+  pullback:
+    trend_ema_order: [9, 21, 50]        # EMA9 > EMA21 > EMA50 且斜率向上
+    div_bands_pct: [1.0, 3.0]           # B3 缠在一起 <1% / B1 已拉开 >=3%
+    e1_days_max: {strong: 30, weak: 10} # 距突破日（按 Leader 市场状态）
+    e2_low_higher: true                 # 回调低点须抬高
+    e3_weekly_up_max: 4                 # 连涨周数 < 4
+    e3_ema21_dev_max_pct: 15.0          # 偏离 EMA21 < 15%
+    c_pullback_to_ema9: true            # 至少回到日线 EMA9
+    support_overlap_min: 2              # 支撑四要素重合 >= 2
+    support_distance_max_pct: 1.0       # 或距最近支撑 <= 1.0%
+    f1_must_cross_first: true           # 必须先上穿过支撑，再回踩
+    v_shape_confirm_bars: 3             # 最低点 -> 触发点 <= 3 根
+    trigger: "intrabar_break_prev_high" # 盘中过前一根高点，不等收盘
+  breakout:
+    base_days_min: 8
+    base_days_max: 13
+    base_depth_max_pct: 8.0
+    atr_compress_ratio_max: 0.85
+    exclude_inside_day_before: true
+    trigger: "intrabar_break_prev_day_high"
+  or_reversal:
+    or_minutes: 15
+    trigger: "intrabar_break_prev_bar_high"
+    note: "量化结论空白，权重 5% 仅为试水"
+
+# ============ 止损（v2.0 区间判定，加密特化 §2 不改）============
+stoploss:
+  s_max:
+    atr_daily_mult: 0.5          # min 的一项
+    adr_ratio: 0.5               # ADR%/2 = ADR% * 0.5
+    hard_cap_pct: 5.0
+  s_min:
+    floor_pct: 0.5
+    atr_5m_mult: 3.0
+  accept_rule: "s_min <= s <= s_max"   # 全部落在区间外 -> 放弃该笔
+  candidates_priority:            # 从前往后取第一个落在区间内的
+    - "day_low"                   # 当日最低点（约六七成）
+    - "trigger_bar_low"           # 触发买入那根 K 线最低点
+    - "prev_bar_low"              # 前一根最低点
+  no_wick_buffer: true            # 加密特化 §1.3：不加插针缓冲
+  reentry:
+    cooldown_hours: 4
+    max_per_pattern_per_day: 2
+    require_pattern_intact: true
+
+# ============ 仓位 ============
+position:
+  risk_per_trade_pct: 0.5        # 基准；自适应见 risk.adaptive
+  max_positions: 8
+  max_same_direction: 4
+  max_new_per_day: 8
+  single_position_max_pct: 30.0  # 名义占账户上限
+  min_notional_usd: 20000       # 参与率控制
+  conflict_priority:             # 多信号争名额时的排序
+    - "sector_diversify"
+    - "r_multiple_desc"
+    - "adtv_desc"
+    - "symbol_asc"               # 确定性兜底
+
+# ============ 出场 ============
+exit:
+  l1_first_trim:
+    r_threshold_grid: [3, 5, 12, 15]   # 四档进网格，不预设
+    extension_check:
+      timeframe: "1h"
+      ema_period: 21
+      atr_period: 14
+      atr_mult: 1.0
+      consecutive_closes: 3
+    trim_pct: 15
+  l2_breakeven:
+    trigger: "ema9_daily_above_entry"
+  l3_trail:
+    offset: "ema9_daily - 0.1 * ATR14(5m)"
+    order_type: "stop_market"
+    ratchet: "only_up"
+  l4_extra_trim:
+    ema_dev_pct: 15.0              # 价格 > EMA9 + 15%
+    volume_spike:
+      vol_mult: 2.5                # 加密轨 2.5 倍（美股 2 倍）
+      bar_change_min_pct: 5.0
+    trim_pct: 15
+    cumulative_cap_pct: 30
+  c1_full_exit_r_grid: [20, 30, 50]
+  c2_long_upper_shadow:
+    day_change_min_pct: "2 * ADR"
+    close_retrace_min_pct: 50
+    trim_pct: 50
+  c3_first_period_fail:
+    check: "close < entry and not breakeven_touched"
+  time_stop:
+    days_soft: 15
+    soft_condition: "pnl < 1R"
+    days_hard: 30
+  market_regime:
+    weak:   { trim_pct: 25, r_threshold_shift: 0 }
+    normal: { trim_pct: 15, r_threshold_shift: 0 }
+    strong: { trim_pct: 5,  r_threshold_shift: +1 }
+    overheated_full_exit: true
+
+# ============ 资金费率（加密特化 §1.2）============
+funding:
+  enabled: true
+  settle_hours_utc: [0, 8, 16]
+  charge_method: "actual_history"        # 逐笔按历史费率，不用均值
+  blackout_single_period_pct: 0.1        # 单期 > 0.1%/8h -> 不开新多仓
+  prefer_low_funding: true
+  max_hold_days_if_annual_gt_8pct: 15
+
+# ============ 杠杆（加密特化 §3.1）============
+leverage:
+  default: 2
+  max: 3
+  liquidation_distance_min_mult: 3.0     # |入场-强平|/入场 >= 3 * s
+  forbidden: ["cross_isolated_mix", "high_lev_during_funding_spike"]
+
+# ============ 风控 ============
+risk:
+  adaptive:
+    base_pct: 0.5
+    after_2_consecutive_stops_pct: 0.25
+    after_3_consecutive_wins_to: 0.75
+    after_5_consecutive_wins_to: 1.0
+    cap_pct: 1.0
+    require_equity_above_prev_high: true
+  circuit_breaker:
+    daily_loss_pct: 2.5
+    weekly_loss_pct: 5.0
+    monthly_drawdown_pct: 8.0
+    consecutive_stops_pause: 6
+    pause_hours: 24
+  exposure:
+    max_total_risk_pct: 4.0        # 8 笔 x 0.5%
+    single_exchange_capital_max_pct: 50.0
+
+# ============ 回测 ============
+backtest:
+  cost:
+    fee_taker_bilateral_pct: 0.08   # 0.04% x 2
+    slippage_entry_pct: 0.05
+    stop_slippage_base_pct: 0.05    # v2.0 基准（压力档 0.10 / 0.30 / 0.50）
+  split:
+    train: ["2019-09-08", "2023-12-31"]
+    oos:   ["2024-01-01", "2026-10-30"]
+    oos_max_uses: 3
+  metrics:
+    report_by_r_bucket: true        # 必须按 1R 分档报告
+    r_buckets_pct: [[0, 1.5], [1.5, 2.0], [2.0, 99]]
+  acceptance:
+    e_r_min: 0.30
+    e_r_reject_below: 0.20
+    oos_vs_is_ratio_min: 0.50
+    e_cost_max_r: 0.35
+    max_drawdown_pct: 25.0
+    annual_trades_min: 400
+    total_trades_min: 2800
+    dsr_use_actual_attempts: true
+  reproducibility:
+    config_hash_required: true
+    shuffle_signals_consistency_check: true
