@@ -26,6 +26,7 @@ import yaml
 from okx_client import OKXClient, OKXError
 import strategy
 import executor
+import universe
 from notifier import FeishuNotifier
 
 STATE_FILE = "state.json"
@@ -159,7 +160,18 @@ def main():
     signal.signal(signal.SIGTERM, handle_exit)
 
     poll = cfg["runtime"]["poll_seconds"]
-    symbols = cfg["universe"]["symbols"]
+
+    # ---- 标的池：优先用 state 里今天已建好的，否则重建 ----
+    if not state.get("pool"):
+        log("首次启动，构建标的池…")
+        p0 = universe.build_pool(client, cfg, log=log)
+        if p0:
+            state["pool"] = p0
+            state["pool_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        else:
+            state["pool"] = list(cfg["universe"]["symbols"])
+            log(f"建池失败，回退到 config 手工列表（{len(state['pool'])} 个）")
+    log(f"当前标的池：{len(state['pool'])} 个")
 
     while not _STOP["flag"]:
         loop_start = time.time()
@@ -175,6 +187,29 @@ def main():
                 state["day"] = today
                 state["day_start_equity"] = calc_equity()[0]
                 log(f"—— 新交易日 {today}，起始权益 {state['day_start_equity']:.4f} ——")
+
+            # ---- 标的池每日重建（默认 UTC 08:00）----
+            if universe.should_rebuild(now, state,
+                                       cfg["runtime"].get("daily_rebuild_hour_utc", 8)):
+                new_pool = universe.build_pool(client, cfg, log=log)
+                if new_pool:
+                    added, removed = universe.pool_diff(state.get("pool"), new_pool)
+                    state["pool"] = new_pool
+                    state["pool_date"] = today
+                    log(f"—— 标的池已重建：{len(new_pool)} 个"
+                        f"（新增 {len(added)}，移除 {len(removed)}）——")
+                    if added or removed:
+                        try:
+                            lines = [f"**当前池** {len(new_pool)} 个"]
+                            if added:
+                                lines.append(f"**新增** {', '.join(a.split('-')[0] for a in added[:8])}")
+                            if removed:
+                                lines.append(f"**移除** {', '.join(r.split('-')[0] for r in removed[:8])}")
+                            notifier.notify_risk("标的池已更新", lines, level="info")
+                        except Exception:
+                            pass
+                else:
+                    log("标的池重建失败，沿用旧池")
 
             # ---- 周切重置（ISO 周）----
             week_key = now.strftime("%G-W%V")
@@ -309,7 +344,8 @@ def main():
                 log(f"不开新仓：持仓已满（{cfg['position']['max_positions']} 笔）")
             else:
                 log(f"扫描信号（{why}，剩余 {slots} 个名额）…")
-                states, signals = strategy.scan(client, symbols, cfg, log=log)
+                scan_list = state.get("pool") or cfg["universe"]["symbols"]
+                states, signals = strategy.scan(client, scan_list, cfg, log=log)
                 for sg in signals:
                     if slots <= 0:
                         log("  名额已满，忽略后续信号")

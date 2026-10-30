@@ -19,6 +19,7 @@ universe:
   # 也做成了 USDT 永续，它们有交易时段限制、周末数据缺口，会让 5m 指标失真。
   # 本池 = ADTV>=1亿 且 instCategory=1，共 19 个（2026-10-30 快照，按成交额降序）
   inst_category: 1
+  max_size: 50                      # 池子上限（防止过多标的拖慢扫描）
   symbols:
     - "BTC-USDT-SWAP"      # 134.4 亿
     - "ETH-USDT-SWAP"      # 126.2 亿
@@ -141,6 +142,7 @@ cost:
 runtime:
   poll_seconds: 60                    # 主循环间隔
   daily_rebuild_utc: "08:00"
+  daily_rebuild_hour_utc: 8         # 标的池重建时点（UTC 小时）
   state_file: "state.json"            # 持仓与熔断状态持久化
   log_file: "logs/live.log"
   dry_run: false                      # 已通过五步验证，改为 true 可回到只观察模式
