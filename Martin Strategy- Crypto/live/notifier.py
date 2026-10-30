@@ -147,20 +147,29 @@ class FeishuNotifier:
         ]
         return self.send_card(f"🟡 减仓 · {inst.split('-')[0]}", lines, template="yellow")
 
-    def notify_close(self, inst, entry_px, exit_px, pnl_usdt, pnl_r, reason, dry=False):
+    def notify_close(self, inst, entry_px, exit_px, pnl_usdt, pnl_r, reason,
+                     equity=None, hold_days=None, dry=False):
+        """平仓卡片：盈亏 + 出场原因 + 账户总额 + 持仓时长"""
         prefix = "【DRY】" if dry else ""
         win = pnl_usdt >= 0
-        # 中文习惯：盈利红、亏损绿
-        tpl = "red" if win else "green"
+        tpl = "red" if win else "green"          # 中文习惯：盈利红、亏损绿
         icon = "🔴" if win else "🟢"
+        pnl_pct = (exit_px - entry_px) / entry_px * 100 if entry_px else 0
+
         lines = [
             f"**标的**　`{inst}`",
             f"**出场原因**　{reason}",
             "---",
-            f"**入场**　{entry_px:.6g}",
-            f"**出场**　{exit_px:.6g}",
-            f"**盈亏**　{'+' if win else ''}{pnl_usdt:.4f} USDT　（{pnl_r:+.2f}R）",
+            f"**入场价**　{entry_px:.6g}",
+            f"**出场价**　{exit_px:.6g}",
+            f"**盈亏**　{'+' if win else ''}{pnl_usdt:.4f} USDT",
+            f"**收益率**　{pnl_pct:+.2f}%　（{pnl_r:+.2f}R）",
         ]
+        if hold_days is not None:
+            lines.append(f"**持仓时长**　{hold_days:.1f} 天")
+        if equity is not None:
+            lines += ["---", f"**账户总额**　{equity:.2f} USDT"]
+
         return self.send_card(f"{prefix}{icon} 平仓 · {inst.split('-')[0]}",
                               lines, template=tpl)
 
@@ -189,7 +198,8 @@ if __name__ == "__main__":
         r_value=1170, r_targets=[3, 5, 15])
     print("开仓卡片:", "✅" if ok1 else "❌")
     ok2 = n.notify_close(
-        "BTC-USDT-SWAP", 78000, 79200, 0.61, 1.54, "9EMA 跟踪")
+        "BTC-USDT-SWAP", 78000, 79200, 15.38, 1.54, "9EMA 跟踪跌破，提前挂单成交",
+        equity=3015.38, hold_days=6.2)
     print("平仓卡片:", "✅" if ok2 else "❌")
     ok3 = n.notify_risk("测试风控告警", ["这是连通性测试", "**无需处理**"], level="warn")
     print("风控卡片:", "✅" if ok3 else "❌")

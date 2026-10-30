@@ -369,8 +369,16 @@ def close_position(client, tr, cfg, reason, log=print, notifier=None, exit_px=No
                 r = tr["r_value"]
                 pnl_r = (px_out - tr["entry_px"]) / r if r > 0 else 0.0
                 pnl_usdt = pnl_r * tr["risk_usdt"]
+                # 平仓后权益更新有延迟，等两秒再查，拿到的才是平仓后的值
+                time.sleep(2)
+                try:
+                    equity = client.get_usdt_equity()
+                except Exception:
+                    equity = None
+                hold_days = (time.time() - tr.get("opened_at", time.time())) / 86400
                 notifier.notify_close(tr["inst_id"], tr["entry_px"], px_out,
-                                      pnl_usdt, pnl_r, reason)
+                                      pnl_usdt, pnl_r, reason,
+                                      equity=equity, hold_days=hold_days)
             except Exception as e:
                 log(f"    [通知] 平仓推送失败（不影响交易）: {str(e)[:80]}")
         return True
