@@ -86,7 +86,8 @@ class FeishuNotifier:
     # ---------- 业务事件 ----------
     def notify_open(self, inst, entry_px, stop_px, notional, risk_usdt, s_pct,
                     risk_pct, stop_source, equity, leverage,
-                    logic=None, fee_open=0.0, fee_round=0.0, dry=False):
+                    logic=None, fee_open=0.0, fee_round=0.0,
+                    r_value=None, r_targets=None, dry=False):
         """开仓卡片：含进场依据、手续费、余额、杠杆；不含张数"""
         prefix = "【DRY】" if dry else ""
         r_val = entry_px - stop_px
@@ -113,6 +114,17 @@ class FeishuNotifier:
             lines.append(
                 f"**手续费**　开仓 {fee_open:.4f} ｜ 往返 {fee_round:.4f} USDT"
                 f"　（往返占风险 {fee_pct_of_risk:.1f}%）")
+        # 参考目标：由 R 倍数换算，非硬性止盈
+        if r_value and r_value > 0 and r_targets:
+            lines.append("---")
+            lines.append("**【参考目标】**（非硬性止盈，实际由 9EMA 跟踪决定）")
+            for r in r_targets:
+                px = entry_px + r * r_value
+                gain = (px - entry_px) / entry_px * 100
+                lines.append(f"· {r}R → {px:.6g}　（+{gain:.2f}%）")
+            lines.append(f"· 保本线：日线 EMA9 上穿 {entry_px:.6g} 后止损移至成本")
+            lines.append("· 之后跟随 9EMA 下方，不设固定止盈")
+
         lines += [
             "---",
             f"**账户余额**　{equity:.2f} USDT",
@@ -159,7 +171,8 @@ if __name__ == "__main__":
                "回调：低点 77900 触及日线 EMA9 77950",
                "V 型：2 根 5m 内收复 EMA9",
                "触发：现价 78000 > 前一根高点 77940"],
-        fee_open=0.50, fee_round=1.00)
+        fee_open=0.50, fee_round=1.00,
+        r_value=1170, r_targets=[3, 5, 15])
     print("开仓卡片:", "✅" if ok1 else "❌")
     ok2 = n.notify_close(
         "BTC-USDT-SWAP", 78000, 79200, 0.61, 1.54, "9EMA 跟踪")

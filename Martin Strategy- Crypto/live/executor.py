@@ -154,6 +154,9 @@ def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None)
                 logic=getattr(sg, "logic", None),
                 fee_open=fee_open,
                 fee_round=fee_open * 2,
+                r_value=trade["r_value"],
+                r_targets=cfg.get("exit", {}).get("l1_first_trim", {})
+                    .get("r_threshold_grid", [3, 5, 12, 15]),
             )
         except Exception as e:
             log(f"    [通知] 开仓推送失败（不影响交易）: {str(e)[:80]}")
