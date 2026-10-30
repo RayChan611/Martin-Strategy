@@ -91,3 +91,8 @@ runtime:
   state_file: "state.json"            # 持仓与熔断状态持久化
   log_file: "logs/live.log"
   dry_run: true                       # true=只打印信号不下单；跑通后再改 false
+
+# ============ 通知 ============
+notify:
+  feishu: true                      # 关闭后不发任何卡片
+  # webhook 放 .env 的 FEISHU_WEBHOOK，不进 git

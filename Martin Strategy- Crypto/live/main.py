@@ -26,6 +26,7 @@ import yaml
 from okx_client import OKXClient, OKXError
 import strategy
 import executor
+from notifier import FeishuNotifier
 
 STATE_FILE = "state.json"
 LOG_FILE = None
@@ -127,6 +128,8 @@ def main():
     log("=" * 68)
 
     client = OKXClient.from_env(demo=demo)
+    notifier = FeishuNotifier.from_env(enabled=cfg.get("notify", {}).get("feishu", True))
+    log(f"飞书通知: {'已启用' if notifier.enabled else '未启用（缺 FEISHU_WEBHOOK）'}")
     state = load_state()
 
     def calc_equity():
@@ -172,12 +175,26 @@ def main():
                 log(f"熔断中，剩余 {left//3600}h{left%3600//60}m，跳过本轮")
                 _sleep_rest(loop_start, poll)
                 continue
+                _sleep_rest(loop_start, poll)
+                continue
 
             day_pnl_pct = 0.0
             if state["day_start_equity"] > 0:
                 day_pnl_pct = (equity - state["day_start_equity"]) / state["day_start_equity"] * 100
             if day_pnl_pct <= -cfg["risk"]["circuit_breaker"]["daily_loss_pct"]:
                 log(f"⛔ 当日亏损 {day_pnl_pct:.2f}% 触及熔断线，今日停止开新仓")
+                flag = f"cb_notified_{today}"
+                if not state.get(flag):
+                    state[flag] = True
+                    try:
+                        notifier.notify_risk(
+                            "日亏熔断触发",
+                            [f"**当日盈亏** {day_pnl_pct:.2f}%",
+                             f"**当前权益** {equity:.2f} USDT",
+                             "今日停止开新仓，已有持仓继续按规则管理"],
+                            level="stop")
+                    except Exception:
+                        pass
                 _sleep_rest(loop_start, poll)
                 continue
 
@@ -193,7 +210,13 @@ def main():
                         action, detail = executor.manage_position(
                             client, tr, cfg, ins, st_daily, log=log)
                         if action == "close":
-                            ok = executor.close_position(client, tr, cfg, detail, log=log)
+                            try:
+                                exit_px = float(client.get_ticker(inst)["last"])
+                            except Exception:
+                                exit_px = None
+                            ok = executor.close_position(
+                                client, tr, cfg, detail, log=log,
+                                notifier=notifier, exit_px=exit_px)
                             if ok:
                                 state["history"].append({
                                     **{k: v for k, v in tr.items() if k != "algo_id"},
@@ -225,7 +248,7 @@ def main():
                     if not ins:
                         continue
                     tr = executor.open_position(
-                        client, sg, cfg, state, ins, equity, log=log)
+                        client, sg, cfg, state, ins, equity, log=log, notifier=notifier)
                     if tr:
                         state["positions"][sg.inst_id] = tr
                         slots -= 1

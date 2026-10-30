@@ -45,7 +45,7 @@ def calc_position(cfg, equity, s_pct, px, ins):
     return lots, notional, real_risk
 
 
-def open_position(client, sg, cfg, state, ins, equity, log=print):
+def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None):
     """
     开仓 + 挂止损。返回 trade dict 或 None。
     """
@@ -104,6 +104,13 @@ def open_position(client, sg, cfg, state, ins, equity, log=print):
 
     if not algo_id:
         log(f"    ❌ 止损单未返回 algoId -> 立即平仓")
+        if notifier:
+            try:
+                notifier.notify_risk("止损单挂单失败，已自动平仓",
+                                     [f"标的 `{sg.inst_id}`", "**未形成裸仓**，无需人工处理"],
+                                     level="stop")
+            except Exception:
+                pass
         try:
             client.close_position(sg.inst_id, pos_side="net",
                                   mgn_mode=cfg["account"]["margin_mode"])
@@ -128,6 +135,18 @@ def open_position(client, sg, cfg, state, ins, equity, log=print):
         "stop_source": sg.stop_source,
     }
     log(f"    ✅ 开仓完成 均价 {fill_px:.6g} 止损 {stop_px:.6g} algoId {algo_id}")
+
+    if notifier:
+        try:
+            notifier.notify_open(
+                inst=sg.inst_id, entry_px=fill_px, stop_px=stop_px,
+                lots=fmt_step(lots, ins["lotSz"]), notional=trade["notional"],
+                risk_usdt=risk, s_pct=sg.s_pct,
+                risk_pct=risk / equity * 100 if equity else 0,
+                stop_source=sg.stop_source,
+            )
+        except Exception as e:
+            log(f"    [通知] 开仓推送失败（不影响交易）: {str(e)[:80]}")
     return trade
 
 
@@ -180,7 +199,7 @@ def manage_position(client, tr, cfg, ins, st_daily, log=print):
     return "hold", f"浮盈 {pnl_r:+.2f}R"
 
 
-def close_position(client, tr, cfg, reason, log=print):
+def close_position(client, tr, cfg, reason, log=print, notifier=None, exit_px=None):
     """撤止损单 + 市价平仓"""
     dry = cfg["runtime"]["dry_run"]
     log(f"    {tr['inst_id']} 平仓：{reason}")
@@ -196,6 +215,16 @@ def close_position(client, tr, cfg, reason, log=print):
     try:
         client.close_position(tr["inst_id"], pos_side="net",
                               mgn_mode=cfg["account"]["margin_mode"])
+        if notifier:
+            try:
+                px_out = exit_px if exit_px else tr["entry_px"]
+                r = tr["r_value"]
+                pnl_r = (px_out - tr["entry_px"]) / r if r > 0 else 0.0
+                pnl_usdt = pnl_r * tr["risk_usdt"]
+                notifier.notify_close(tr["inst_id"], tr["entry_px"], px_out,
+                                      pnl_usdt, pnl_r, reason)
+            except Exception as e:
+                log(f"    [通知] 平仓推送失败（不影响交易）: {str(e)[:80]}")
         return True
     except Exception as e:
         log(f"    ❌ 平仓失败: {e}")
