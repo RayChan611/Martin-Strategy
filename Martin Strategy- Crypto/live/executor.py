@@ -1,3 +1,29 @@
+def check_liquidation_distance(entry_px, s_pct, lever, mmr_pct=0.5):
+    """
+    估算强平距离是否足够安全。
+    全仓模式下强平距离 ≈ 1/杠杆 - 维持保证金率。
+    要求：强平距离 >= 3 x 止损宽度（止损先触发，不会被强平）。
+    返回 (是否通过, 强平距离%, 要求距离%)
+    """
+    if lever <= 0:
+        return False, 0.0, 0.0
+    liq_dist = (1.0 / lever - mmr_pct / 100.0) * 100
+    need = 3.0 * s_pct
+    return liq_dist >= need, liq_dist, need
+
+
+def ensure_leverage(client, inst_id, lever, cfg, log=print):
+    """开仓前确保交易所侧杠杆正确。已有持仓时 OXX 不允许改，捕获后继续。"""
+    try:
+        client.set_leverage(inst_id, lever, mgn_mode=cfg["account"]["margin_mode"])
+        return True
+    except Exception as e:
+        msg = str(e)[:100]
+        # 已有持仓/同方向仓位时不允许改杠杆，不算致命错误
+        log(f"    {inst_id} 设置杠杆 {lever}x 失败（可能已有持仓）: {msg}")
+        return False
+
+
 """
 执行器 · 从信号到下单，以及持仓生命周期管理
 
@@ -22,12 +48,13 @@ import strategy
 import advisor
 
 
-def calc_position(cfg, equity, s_pct, px, ins):
+def calc_position(cfg, equity, s_pct, px, ins, risk_pct=None):
     """
     返回 (lots, notional_usdt, risk_usdt) 或 (0, 0, 0) 表示不可开
     """
     p = cfg["position"]
-    risk_usdt = equity * p["risk_per_trade_pct"] / 100.0
+    rp = risk_pct if risk_pct is not None else p["risk_per_trade_pct"]
+    risk_usdt = equity * rp / 100.0
     if s_pct <= 0:
         return 0.0, 0.0, 0.0
     target_notional = risk_usdt / (s_pct / 100.0)
@@ -49,17 +76,32 @@ def calc_position(cfg, equity, s_pct, px, ins):
     return lots, notional, real_risk
 
 
-def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None):
+def open_position(client, sg, cfg, state, ins, equity, log=print, notifier=None, risk_pct=None):
     """
     开仓 + 挂止损。返回 trade dict 或 None。
     """
     p = cfg["position"]
     dry = cfg["runtime"]["dry_run"]
 
-    lots, notional, risk = calc_position(cfg, equity, sg.s_pct, sg.entry_px, ins)
+    lots, notional, risk = calc_position(cfg, equity, sg.s_pct, sg.entry_px, ins, risk_pct)
     if lots <= 0:
         log(f"    {sg.inst_id} 仓位计算为 0（名义不足或粒度不够），放弃")
         return None
+
+    # ---- 强平距离校验：确保止损先于强平触发 ----
+    lever = cfg["position"].get("leverage_set", 3)
+    ok_liq, liq_dist, need_dist = check_liquidation_distance(
+        sg.entry_px, sg.s_pct, lever,
+        cfg.get("leverage", {}).get("mmr_pct", 0.5))
+    if not ok_liq:
+        log(f"    ❌ {sg.inst_id} 强平距离不足：{lever}x 下强平距离 {liq_dist:.1f}%，"
+            f"要求 ≥ 3×止损 = {need_dist:.1f}%，放弃该笔")
+        return None
+    log(f"    {sg.inst_id} 强平距离校验通过：{liq_dist:.1f}% ≥ {need_dist:.1f}%")
+
+    # ---- 确保交易所侧杠杆正确 ----
+    if not dry:
+        ensure_leverage(client, sg.inst_id, lever, cfg, log=log)
 
     log(f"    {sg.inst_id} 开仓 {fmt_step(lots, ins['lotSz'])} 张 "
         f"名义 {notional:.2f}U 风险 {risk:.3f}U ({risk/equity*100:.2f}%)")

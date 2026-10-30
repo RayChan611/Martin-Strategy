@@ -87,6 +87,9 @@ def load_state():
         "positions": {},
         "day": "",
         "day_start_equity": 0.0,
+        "week": "",
+        "week_start_equity": 0.0,
+        "week_risk_pct": 0.0,
         "consecutive_stops": 0,
         "pause_until": 0,
         "history": [],
@@ -163,12 +166,23 @@ def main():
         try:
             now = now_utc()
             today = now.strftime("%Y-%m-%d")
+            # 风控与风险档位（提前定义，避免各 continue 分支后未定义）
+            cb = cfg["risk"]["circuit_breaker"]
+            eff_risk_pct = cfg["position"]["risk_per_trade_pct"]
 
             # ---- 日切重置 ----
             if state["day"] != today:
                 state["day"] = today
                 state["day_start_equity"] = calc_equity()[0]
                 log(f"—— 新交易日 {today}，起始权益 {state['day_start_equity']:.4f} ——")
+
+            # ---- 周切重置（ISO 周）----
+            week_key = now.strftime("%G-W%V")
+            if state.get("week") != week_key:
+                state["week"] = week_key
+                state["week_start_equity"] = calc_equity()[0]
+                state["week_risk_pct"] = 0.0     # 周初恢复正常风险
+                log(f"—— 新交易周 {week_key}，起始权益 {state['week_start_equity']:.4f} ——")
 
             equity, _ = calc_equity()
 
@@ -184,6 +198,16 @@ def main():
             day_pnl_pct = 0.0
             if state["day_start_equity"] > 0:
                 day_pnl_pct = (equity - state["day_start_equity"]) / state["day_start_equity"] * 100
+            # ---- 周亏降级（不停止交易，只降风险）----
+            week_base = state.get("week_start_equity") or 0
+            if week_base > 0:
+                week_pnl_pct = (equity - week_base) / week_base * 100
+                if week_pnl_pct <= -cb["weekly_loss_pct"]:
+                    eff_risk_pct = state.get("week_risk_pct") or 0.25
+                    state["week_risk_pct"] = eff_risk_pct
+                    log(f"⚠️ 本周亏损 {week_pnl_pct:.2f}% 触及 {cb['weekly_loss_pct']}% "
+                        f"→ 风险降至 {eff_risk_pct}%")
+
             if day_pnl_pct <= -cfg["risk"]["circuit_breaker"]["daily_loss_pct"]:
                 log(f"⛔ 当日亏损 {day_pnl_pct:.2f}% 触及熔断线，今日停止开新仓")
                 flag = f"cb_notified_{today}"
@@ -241,6 +265,28 @@ def main():
                             ok = executor.close_position(
                                 client, tr, cfg, detail, log=log,
                                 notifier=notifier, exit_px=exit_px)
+                            if ok and exit_px:
+                                rr = tr["r_value"]
+                                pnl_r = (exit_px - tr["entry_px"]) / rr if rr > 0 else 0
+                                if pnl_r < 0:
+                                    state["consecutive_stops"] = state.get("consecutive_stops", 0) + 1
+                                    log(f"    连亏计数: {state['consecutive_stops']} 笔")
+                                else:
+                                    state["consecutive_stops"] = 0
+                                    log("    连亏计数已清零")
+                                # 连亏 N 笔 -> 暂停
+                                if state["consecutive_stops"] >= cb["consecutive_stops_pause"]:
+                                    pause_h = cb.get("pause_hours", 24)
+                                    state["pause_until"] = time.time() + pause_h * 3600
+                                    log(f"⛔ 连亏 {state['consecutive_stops']} 笔，暂停交易 {pause_h} 小时")
+                                    try:
+                                        notifier.notify_risk(
+                                            f"连亏 {state['consecutive_stops']} 笔，暂停交易",
+                                            [f"暂停 {pause_h} 小时",
+                                             f"当前权益 {equity:.2f} USDT"],
+                                            level="stop")
+                                    except Exception:
+                                        pass
                             if ok:
                                 state["history"].append({
                                     **{k: v for k, v in tr.items() if k != "algo_id"},
@@ -272,7 +318,8 @@ def main():
                     if not ins:
                         continue
                     tr = executor.open_position(
-                        client, sg, cfg, state, ins, equity, log=log, notifier=notifier)
+                        client, sg, cfg, state, ins, equity, log=log,
+                        notifier=notifier, risk_pct=eff_risk_pct)
                     if tr:
                         state["positions"][sg.inst_id] = tr
                         slots -= 1
