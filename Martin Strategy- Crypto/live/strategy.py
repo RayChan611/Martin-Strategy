@@ -468,9 +468,11 @@ def check_breakout_trigger(client, st: DailyState, ccfg: "Config", cfg: dict):
 
 
 # ============ 对外入口 ============
-def scan(client, symbols, cfg, log=print):
+def scan(client, symbols, cfg, log=print, exclude=None):
     """
     扫描全部标的，返回 (状态列表, 信号列表)。
+
+    exclude: 已持仓的标的集合，直接跳过（既防重复开仓，也省 API 请求）
 
     每标的按买法优先级依次尝试，最多产出一个信号：
       1) 回调买法（权重>0 且日线完整前置通过）
@@ -481,8 +483,11 @@ def scan(client, symbols, cfg, log=print):
     w_pb = w.get("pullback", 0.8)
     w_bo = w.get("breakout", 0.15)
     states, signals = [], []
+    skip = set(exclude or ())
 
     for inst in symbols:
+        if inst in skip:
+            continue          # 已持仓，不重复扫描
         try:
             st = build_daily_state(client, inst, ccfg)
             if st is None:

@@ -345,11 +345,37 @@ def main():
             else:
                 log(f"扫描信号（{why}，剩余 {slots} 个名额）…")
                 scan_list = state.get("pool") or cfg["universe"]["symbols"]
-                states, signals = strategy.scan(client, scan_list, cfg, log=log)
+                held = set(state["positions"].keys())
+                if held:
+                    log(f"  已持仓 {len(held)} 个标的将被跳过：{', '.join(x.split('-')[0] for x in held)}")
+                states, signals = strategy.scan(client, scan_list, cfg, log=log, exclude=held)
                 for sg in signals:
                     if slots <= 0:
                         log("  名额已满，忽略后续信号")
                         break
+                    # 二次确认：state 里没有，但交易所可能有（防 state 丢失/不一致）
+                    if sg.inst_id in state["positions"]:
+                        log(f"  {sg.inst_id} 已在持仓中，跳过")
+                        continue
+                    try:
+                        live_pos = [p for p in client.get_positions(sg.inst_id)
+                                    if float(p.get("pos") or 0) != 0]
+                        if live_pos:
+                            log(f"  ⚠️ {sg.inst_id} 交易所有持仓但 state 未记录，跳过开仓")
+                            try:
+                                notifier.notify_risk(
+                                    "发现 state 与交易所不一致",
+                                    [f"标的 `{sg.inst_id}`",
+                                     f"交易所持仓 {live_pos[0].get('pos')} 张",
+                                     "**已跳过开仓**，请人工核对 state.json"],
+                                    level="stop")
+                            except Exception:
+                                pass
+                            continue
+                    except Exception as e:
+                        log(f"  {sg.inst_id} 持仓核对失败，跳过以防重复: {str(e)[:60]}")
+                        continue
+
                     ins = get_instrument(client, sg.inst_id)
                     if not ins:
                         continue
