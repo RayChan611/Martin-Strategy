@@ -109,6 +109,168 @@ def get_instrument(client, inst_id):
     return ins[0] if ins else None
 
 
+def reconcile(client, state, cfg, notifier, log=print):
+    """
+    启动时对账：以交易所为准，修正 state 并补齐止损单。
+
+    处理的四种不一致：
+      a) state 有 / 交易所无  -> 已平仓（止损或手动），从 state 移除并记入 history
+      b) state 无 / 交易所有  -> state 丢失，用 avgPx 反推止损接管（否则无法管理）
+      c) 两边都有但数量不符   -> 以交易所为准，同步 lots 并改小止损单
+      d) 有持仓但无止损单     -> 裸仓，立即补挂
+
+    返回 True 表示对账完成可以正常交易；False 表示存在需人工处理的问题，
+    调用方应禁止开新仓。
+    """
+    dry = cfg["runtime"]["dry_run"]
+    margin_mode = cfg["account"]["margin_mode"]
+    pos_side = cfg["account"].get("pos_side", "long")
+
+    try:
+        live = {}
+        for p in client.get_positions():
+            try:
+                qty = float(p.get("pos") or 0)
+            except (TypeError, ValueError):
+                continue
+            if qty != 0:
+                live[p["instId"]] = {
+                    "pos": qty,
+                    "avgPx": float(p.get("avgPx") or 0),
+                    "upl": float(p.get("upl") or 0),
+                }
+        algos = {}
+        for a in client.get_pending_algos("conditional"):
+            algos.setdefault(a["instId"], []).append(a)
+    except Exception as e:
+        log(f"❌ 对账失败（无法读取交易所持仓）: {str(e)[:100]}")
+        log("   → 本次启动将禁止开新仓，只管理已有持仓")
+        return False
+
+    problems = []
+    st_pos = state["positions"]
+
+    # ---- a) state 有、交易所无 ----
+    for inst in list(st_pos.keys()):
+        if inst not in live:
+            tr = st_pos[inst]
+            log(f"  [对账] {inst}: state 有记录但交易所已无持仓 → 已平仓，移出 state")
+            state["history"].append({
+                "inst_id": inst,
+                "entry_px": tr.get("entry_px"),
+                "stop_px": tr.get("stop_px"),
+                "opened_at": tr.get("opened_at"),
+                "closed_at": int(time.time()),
+                "close_reason": "对账发现交易所已无持仓（止损或手动平仓）",
+                "inferred": True,
+            })
+            del st_pos[inst]
+
+    # ---- b) state 无、交易所有 ----
+    for inst, info in live.items():
+        if inst in st_pos:
+            continue
+        avg = info["avgPx"]
+        if avg <= 0:
+            log(f"  [对账] {inst}: 有持仓但均价为 0，无法接管，需人工处理")
+            problems.append(f"{inst}: 有持仓但均价异常")
+            continue
+        stop_px = round(avg * 0.985, 8)
+        log(f"  [对账] ⚠️ {inst}: 交易所有 {info['pos']} 张但 state 无记录 → 用均价反推接管")
+        st_pos[inst] = {
+            "inst_id": inst,
+            "side": "long",
+            "lots": str(info["pos"]),
+            "entry_px": avg,
+            "stop_px": stop_px,
+            "init_stop_px": stop_px,
+            "algo_id": None,
+            "s_pct": 1.5,
+            "r_value": avg - stop_px,
+            "risk_usdt": 0.0,
+            "notional": 0.0,
+            "opened_at": int(time.time()),
+            "trimmed": False,
+            "stop_source": "reconcile_inferred",
+            "inferred": True,
+        }
+        problems.append(f"{inst}: state 无记录，已按均价 {avg:.6g} 反推接管")
+
+    # ---- c) 数量不符 ----
+    for inst in set(st_pos.keys()) & set(live.keys()):
+        state_lots = float(st_pos[inst].get("lots") or 0)
+        live_lots = live[inst]["pos"]
+        if abs(state_lots - live_lots) > 1e-9:
+            log(f"  [对账] {inst}: 数量不符 state={state_lots} vs 交易所={live_lots} → 以交易所为准")
+            st_pos[inst]["lots"] = str(live_lots)
+            problems.append(f"{inst}: 数量已从 {state_lots} 校正为 {live_lots}")
+
+    # ---- d) 止损单检查 ----
+    for inst, info in live.items():
+        tr = st_pos.get(inst)
+        if not tr:
+            continue
+        mine = algos.get(inst, [])
+        if len(mine) == 0:
+            log(f"  [对账] ❌ {inst} 裸仓（无止损单）→ 立即补挂")
+            if not dry:
+                try:
+                    ins = get_instrument(client, inst)
+                    if ins:
+                        tid = client.place_stop_loss(
+                            inst, fmt_step(info["pos"], ins["lotSz"]),
+                            tr["stop_px"], td_mode=margin_mode,
+                            pos_side=pos_side, side="sell")
+                        tr["algo_id"] = tid
+                        log(f"      已补挂 algoId={tid} @ {tr['stop_px']}")
+                    else:
+                        problems.append(f"{inst}: 合约信息缺失，无法补挂止损")
+                except Exception as e:
+                    log(f"      补挂失败: {str(e)[:100]}")
+                    problems.append(f"{inst}: 补挂止损失败")
+            else:
+                log(f"      [dry_run] 跳过补挂")
+        elif len(mine) > 1:
+            log(f"  [对账] ⚠️ {inst} 有 {len(mine)} 个止损单（重复）→ 保留 1 个，撤其余")
+            for a in mine[1:]:
+                try:
+                    client.cancel_algo(inst, a["algoId"])
+                    log(f"      已撤重复单 {a['algoId']}")
+                except Exception:
+                    pass
+            if not tr.get("algo_id") or tr["algo_id"] != mine[0]["algoId"]:
+                tr["algo_id"] = mine[0]["algoId"]
+        else:
+            # 单一止损单，核对数量是否匹配
+            try:
+                a_sz = float(mine[0].get("sz") or 0)
+                if abs(a_sz - info["pos"]) > 1e-9:
+                    log(f"  [对账] {inst} 止损单数量 {a_sz} ≠ 持仓 {info['pos']} → 修正")
+                    client.amend_stop_loss(inst, mine[0]["algoId"], tr["stop_px"],
+                                           sz=str(info["pos"]))
+            except Exception as e:
+                log(f"      止损单数量核对失败: {str(e)[:80]}")
+            if tr.get("algo_id") != mine[0]["algoId"]:
+                tr["algo_id"] = mine[0]["algoId"]
+
+    if problems:
+        log(f"  [对账] 发现 {len(problems)} 处需关注：")
+        for x in problems:
+            log(f"         · {x}")
+        try:
+            notifier.notify_risk(
+                "启动对账发现不一致",
+                ["**已自动修正可修的部分**"] + [f"· {x}" for x in problems[:6]] +
+                (["（仅显示前 6 条）"] if len(problems) > 6 else []),
+                level="warn")
+        except Exception:
+            pass
+        return len([x for x in problems if "反推接管" in x or "无法" in x]) == 0
+
+    log("  [对账] state 与交易所一致，止损单齐全")
+    return True
+
+
 def handle_exit(signum, frame):
     _STOP["flag"] = True
     log(f"收到退出信号 {signum}，保存状态后退出…")
@@ -160,6 +322,13 @@ def main():
     signal.signal(signal.SIGTERM, handle_exit)
 
     poll = cfg["runtime"]["poll_seconds"]
+
+    # ---- 启动对账：以交易所为准修正 state，并补齐止损单 ----
+    log("启动对账…")
+    reconcile_ok = reconcile(client, state, cfg, notifier, log=log)
+    save_state(state)
+    if not reconcile_ok:
+        log("⚠️ 对账存在需人工处理的问题，本次启动不开新仓")
 
     # ---- 标的池：优先用 state 里今天已建好的，否则重建 ----
     if not state.get("pool"):
@@ -344,6 +513,10 @@ def main():
                 log(f"不开新仓：持仓已满（{cfg['position']['max_positions']} 笔）")
             else:
                 log(f"扫描信号（{why}，剩余 {slots} 个名额）…")
+                if not reconcile_ok:
+                    log("不开新仓：启动对账存在未解决问题")
+                    _sleep_rest(loop_start, poll)
+                    continue
                 scan_list = state.get("pool") or cfg["universe"]["symbols"]
                 held = set(state["positions"].keys())
                 if held:
