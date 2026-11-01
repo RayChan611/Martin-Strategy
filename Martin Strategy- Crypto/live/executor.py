@@ -247,7 +247,17 @@ def manage_position(client, tr, cfg, ins, st_daily, log=print):
                 tr["stop_px"] = new_px
                 return "amend", f"止损上移至 {new_px:.6g}"
             except Exception as e:
-                log(f"    ❌ 改单失败 {e}（保持原止损）")
+                log(f"    ❌ 改单失败 {e}")
+                # 关键：改单失败往往意味着止损单已触发（仓位已平）。
+                # 必须核实持仓，否则系统会一直以为有仓，持续改一个不存在的单。
+                try:
+                    still = [p for p in client.get_positions(tr["inst_id"])
+                             if float(p.get("pos") or 0) != 0]
+                    if not still:
+                        return "closed_externally", "持仓已不存在（止损单已触发平仓）"
+                    log(f"    （持仓仍在 {still[0].get('pos')} 张，保持原止损）")
+                except Exception as e2:
+                    log(f"    （持仓核实失败，保持原止损）: {str(e2)[:60]}")
         else:
             log(f"    [dry_run] 将把止损上移到 {new_px:.6g}")
             tr["stop_px"] = new_px

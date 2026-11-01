@@ -357,6 +357,17 @@ def main():
                 state["day_start_equity"] = calc_equity()[0]
                 log(f"—— 新交易日 {today}，起始权益 {state['day_start_equity']:.4f} ——")
 
+            # ---- 每小时定期对账（防止运行中出现 state 与交易所不一致）----
+            if time.time() - state.get("last_reconcile_ts", 0) > 3600:
+                try:
+                    ok_r = reconcile(client, state, cfg, notifier, log=log)
+                    state["last_reconcile_ts"] = int(time.time())
+                    if not ok_r:
+                        log("⚠️ 定期对账发现问题，暂停开新仓")
+                        reconcile_ok = False
+                except Exception as e:
+                    log(f"定期对账异常: {str(e)[:80]}")
+
             # ---- 标的池每日重建（默认 UTC 08:00）----
             if universe.should_rebuild(now, state,
                                        cfg["runtime"].get("daily_rebuild_hour_utc", 8)):
@@ -459,6 +470,26 @@ def main():
                                 notifier.notify_trim(inst, detail, tr["entry_px"],
                                                      cur, pnl_r, reason,
                                                      equity=eq, hold_days=hd)
+                            except Exception:
+                                pass
+                        elif action == "closed_externally":
+                            log(f"    {inst} {detail} → 从 state 移除并记录")
+                            state["history"].append({
+                                "inst_id": inst,
+                                "entry_px": tr.get("entry_px"),
+                                "stop_px": tr.get("stop_px"),
+                                "opened_at": tr.get("opened_at"),
+                                "closed_at": int(time.time()),
+                                "close_reason": f"外部平仓：{detail}",
+                                "inferred": True,
+                            })
+                            del state["positions"][inst]
+                            try:
+                                notifier.notify_risk(
+                                    "持仓已在交易所平掉",
+                                    [f"标的 `{inst}`", f"原因：{detail}",
+                                     "**已从 state 移除**（可能是止损触发）"],
+                                    level="info")
                             except Exception:
                                 pass
                         elif action == "close":
